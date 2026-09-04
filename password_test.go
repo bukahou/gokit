@@ -29,7 +29,7 @@ func TestCostOf(t *testing.T) {
 }
 
 func TestPadRounds(t *testing.T) {
-	g := &Guard{cost: 12}
+	v := &Verifier{cost: 12}
 
 	cases := []struct {
 		name  string
@@ -48,14 +48,14 @@ func TestPadRounds(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if got := g.padRounds(string(h)); got != c.want {
+			if got := v.padRounds(string(h)); got != c.want {
 				t.Errorf("padRounds(cost=%d) = %d, 期望 %d  (%s)", c.cost, got, c.want, c.about)
 			}
 		})
 	}
 
 	// 非法 hash 不补 —— 它由绝对下界测试负责抓, 不是这里。
-	if got := g.padRounds(""); got != 0 {
+	if got := v.padRounds(""); got != 0 {
 		t.Errorf("空 hash 应当补 0 次, 得到 %d", got)
 	}
 }

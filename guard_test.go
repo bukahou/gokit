@@ -83,7 +83,7 @@ func TestNew_四个参数必填(t *testing.T) {
 func TestNew_dummy按当前cost现生成(t *testing.T) {
 	for _, c := range []int{bcrypt.MinCost, 6} {
 		g := mustGuard(t, WithCost(c))
-		got, ok := costOf(g.dummyHash)
+		got, ok := costOf(g.verifier.dummyHash)
 		if !ok || got != c {
 			t.Errorf("cost=%d 时 dummy 的 cost = %d (ok=%v), 二者必须同源于一次构造", c, got, ok)
 		}
@@ -383,7 +383,7 @@ func TestAbsoluteLowerBound(t *testing.T) {
 	g := mustGuard(t, WithCost(10)) // 真实 cost, 单次约 36ms
 	realHash, _ := bcrypt.GenerateFromPassword([]byte("pw"), 10)
 
-	for name, d := range pathTimings(t, g.verify, string(realHash), g.dummyHash) {
+	for name, d := range pathTimings(t, g.verifier.Verify, string(realHash), g.verifier.dummyHash) {
 		if d < 绝对下界 {
 			t.Errorf("路径 %q 耗时 %v < 绝对下界 %v —— 该路径被调用了但没干活", name, d, 绝对下界)
 		}
@@ -395,10 +395,10 @@ func TestAbsoluteLowerBound(t *testing.T) {
 // 造一个「dummy 是空串」的变体: 它仍然满足「唯一调用点且支配所有返回」,
 // bcrypt 却会在 20ns 内报 hash 太短返回。若绝对下界抓不住它, 那条检查是摆设。
 func TestAbsoluteLowerBound_反向验证(t *testing.T) {
-	mutant := &Guard{cost: 10, dummyHash: ""} // ⛔ 非法 dummy
+	mutant := &Verifier{cost: 10, dummyHash: ""} // ⛔ 非法 dummy
 
 	start := time.Now()
-	mutant.verify(mutant.dummyHash, "guess")
+	mutant.Verify(mutant.dummyHash, "guess")
 	elapsed := time.Since(start)
 
 	if elapsed >= 绝对下界 {

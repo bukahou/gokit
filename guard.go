@@ -79,11 +79,8 @@ type Guard struct {
 	audit  AuditHook
 	now    func() time.Time
 
-	// dummyHash 在构造期按 cost 现生成 —— ⛔ 不是常量。
-	dummyHash string
-
-	// padSink 承接补齐运算的结果, 防止它被当成死代码消掉。
-	padSink bool
+	// verifier 是口令校验的唯一实现, 与宿主共用同一份 (见 verifier.go)。
+	verifier *Verifier
 }
 
 // New 构造守卫。
@@ -135,14 +132,14 @@ func New(
 		}
 	}
 
-	// dummy 在此现生成: 它与 cost 同源于这一次构造, 所以
+	// 校验器在此现生成: 它与 cost 同源于这一次构造, 所以
 	// 「dummy 的 cost 与目标不一致」这个状态【构造不出来】。
-	// 用 crypto/rand 的开销只在这里付一次, 不在请求路径上。
-	d, err := bcrypt.GenerateFromPassword([]byte("localauth-dummy"), g.cost)
+	// crypto/rand 与一次 bcrypt 的开销只在这里付, 不在请求路径上。
+	v, err := NewVerifier(g.cost)
 	if err != nil {
-		return nil, wrapErr(CodeMisconfigured, "生成 dummy hash 失败", err)
+		return nil, err
 	}
-	g.dummyHash = string(d)
+	g.verifier = v
 
 	return g, nil
 }
@@ -195,11 +192,13 @@ func (g *Guard) Login(
 		return LoginOutcome{}, wrapErr(CodeLookupUnavailable, "查询用户失败", err)
 	}
 	if !found {
-		// ⚠️ dummy 是【合法的】bcrypt hash, 所以它真的会烧掉等量的时间。
-		// 一个非法 hash (空串) 会在 20ns 内返回, 那样这一步形同虚设。
-		hash = g.dummyHash
+		// ⚠️ 这里【不】自己换 dummy —— 代换规则在 Verifier 里, 一处判定。
+		// 传空串即可: Verifier 认「这是不是一个合法的 bcrypt hash」,
+		// 于是「用户不存在」与「联邦账号无本地口令」走的是同一条路径,
+		// 且都不可能因 dummy 匹配而放行。
+		hash = ""
 	}
-	ok := g.verify(hash, password)
+	ok := g.verifier.Verify(hash, password)
 
 	// ④ 成功优先于账号退避。
 	//
