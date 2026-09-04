@@ -474,7 +474,7 @@ func TestAdmission(t *testing.T) {
 // 完整理由与代价见 ClientIPStrategy 的注释。
 func TestLogin_IP来源不可用时降级而非拒绝(t *testing.T) {
 	var events []AuditEvent
-	g := mustGuard(t, WithAuditHook(func(e AuditEvent) { events = append(events, e) }))
+	g := mustGuard(t, WithAuditHook(func(_ context.Context, e AuditEvent) { events = append(events, e) }))
 	lookup := lookupOf(t, bcrypt.MinCost, map[string]string{"alice": "correct-horse"})
 	ctx := context.Background()
 
@@ -488,13 +488,18 @@ func TestLogin_IP来源不可用时降级而非拒绝(t *testing.T) {
 	t.Run("必须发出可告警的审计事件", func(t *testing.T) {
 		var found bool
 		for _, e := range events {
-			if e.Kind == "ip_source_unavailable" {
+			if e.Kind == EventIPSourceUnavailable {
 				found = true
+				if !e.Kind.Degraded() {
+					t.Error("该事件必须被 Degraded() 认作降级 —— " +
+						"消费者靠它统一判定, 漏判的表现正好是告警不响")
+				}
 			}
 		}
 		if !found {
-			t.Fatal("降级没有发出 ip_source_unavailable —— " +
-				"那样这次防护损失就是完全不可见的, 而不可见的降级等于悄悄关掉一半防护")
+			t.Fatalf("降级没有发出 %s —— "+
+				"那样这次防护损失就是完全不可见的, 而不可见的降级等于悄悄关掉一半防护",
+				EventIPSourceUnavailable)
 		}
 	})
 }
@@ -547,5 +552,60 @@ func TestLogin_IP不可用时账号维度仍然生效(t *testing.T) {
 	}
 	if !g.policy.Blocked(st, now) {
 		t.Fatal("账号维度应当已进入退避 —— 否则降级实际上是把两个维度都关了")
+	}
+}
+
+// ⭐ TestEventKind_值不可改名
+//
+// 这些字符串是【外部告警规则的匹配键】(atlhyper 侧按 event 字段查 ClickHouse)。
+// 改名不会让任何测试变红、不会让编译出错、日志照发 —— 只是那条规则永远不再命中。
+// 所以这里把值本身写死一份, 让改名这个动作必须【显式经过这个测试】。
+//
+// ⛔ 若因为这条测试红了而来改它: 停一下。要换语义请【加一个新的 Kind】,
+// 并确认旧规则已经迁移过去, 而不是就地改掉旧的。
+func TestEventKind_值不可改名(t *testing.T) {
+	frozen := map[EventKind]string{
+		EventAllowed:                 "login.allowed",
+		EventDenied:                  "login.denied",
+		EventLocked:                  "login.locked",
+		EventIPSourceUnavailable:     "login.ip_source_unavailable",
+		EventIPStoreUnavailable:      "login.ip_store_unavailable",
+		EventAccountStoreUnavailable: "login.account_store_unavailable",
+	}
+	for k, want := range frozen {
+		if string(k) != want {
+			t.Errorf("EventKind 的值被改成了 %q (原 %q) —— 外部告警规则会静默失效", string(k), want)
+		}
+	}
+}
+
+// TestEventKind_Degraded 覆盖全部取值。
+//
+// ⚠️ 加了新 Kind 却忘了在这里登记时, 这条会红 —— 而那正是最容易漏、
+// 且漏了没有任何症状的地方 (新的降级信号不被认作降级 = 不告警)。
+func TestEventKind_Degraded(t *testing.T) {
+	degraded := map[EventKind]bool{
+		EventAllowed:                 false,
+		EventDenied:                  false,
+		EventLocked:                  false,
+		EventIPSourceUnavailable:     true,
+		EventIPStoreUnavailable:      true,
+		EventAccountStoreUnavailable: true,
+	}
+	for k, want := range degraded {
+		if got := k.Degraded(); got != want {
+			t.Errorf("%s.Degraded() = %v, 期望 %v", k, got, want)
+		}
+	}
+
+	// 守卫实际发得出来的 Kind 必须全在上表里 —— 否则这张表是残缺的,
+	// 而残缺的表在加新 Kind 时正好静默漏掉。
+	emitted := []EventKind{
+		EventAllowed, EventDenied, EventLocked,
+		EventIPSourceUnavailable, EventIPStoreUnavailable, EventAccountStoreUnavailable,
+	}
+	if len(emitted) != len(degraded) {
+		t.Errorf("Kind 清单 %d 项与 Degraded 表 %d 项对不上 —— 有新 Kind 没登记",
+			len(emitted), len(degraded))
 	}
 }

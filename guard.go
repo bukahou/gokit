@@ -15,9 +15,54 @@ import (
 // 「所有人密码都输错了」一模一样。
 type LookupFunc func(ctx context.Context, username string) (hash string, found bool, err error)
 
+// EventKind 是审计事件的【稳定机器标识】。
+//
+// ⚠️ 必须是类型化常量而不是裸字符串, 理由是一个很安静的失效:
+// 告警规则按这个值匹配, 而一个打错字母的 g.emit("ip_source_unavailble", …)
+// 编译得过、日志照发、规则永远不响 —— 没有任何症状。
+// 常量让这个状态编译不过。
+//
+// ⛔ 这些值一旦发布就【不可改名】: 它们是外部告警规则的匹配键,
+// 改名等于静默关掉那条规则。要换语义就加一个新的 Kind。
+type EventKind string
+
+const (
+	// EventAllowed 登录成功。
+	EventAllowed EventKind = "login.allowed"
+	// EventDenied 凭据类失败 (密码错 / 用户不存在 / 被 IP 维度提前拒)。
+	EventDenied EventKind = "login.denied"
+	// EventLocked 账号处于退避中而被拒。
+	EventLocked EventKind = "login.locked"
+
+	// ⭐ 下面三个是【防护降级】信号 —— 它们存在的全部意义就是被告警。
+	//
+	// 站点在这三种状态下看起来完全正常, 唯一的症状就是这几条事件。
+	// 不接告警的话, 一个配错的部署会永久少一个控制面而没人知道。
+
+	// EventIPSourceUnavailable 解析不出客户端来源 IP, IP 维度已降级。
+	EventIPSourceUnavailable EventKind = "login.ip_source_unavailable"
+	// EventIPStoreUnavailable IP 维度的计数存储不可用, 本次未生效。
+	EventIPStoreUnavailable EventKind = "login.ip_store_unavailable"
+	// EventAccountStoreUnavailable 账号维度的计数存储不可用, 本次未生效。
+	EventAccountStoreUnavailable EventKind = "login.account_store_unavailable"
+)
+
+// Degraded 报告这个事件是否表示【防护已降级】。
+//
+// 给消费者一个统一判据, 免得每一家各自维护一份 Kind 清单 ——
+// 那种清单在加新 Kind 时必然漏掉一处, 而漏掉的表现是告警不响。
+func (k EventKind) Degraded() bool {
+	switch k {
+	case EventIPSourceUnavailable, EventIPStoreUnavailable, EventAccountStoreUnavailable:
+		return true
+	default:
+		return false
+	}
+}
+
 // AuditEvent 是守卫发出的审计事件。消费者决定怎么处理。
 type AuditEvent struct {
-	Kind     string // "denied" / "locked" / "allowed"
+	Kind     EventKind
 	Username string
 	ClientIP string
 	At       time.Time
@@ -31,7 +76,10 @@ type AuditEvent struct {
 // 而浪费的是关键时间。攻击者收不到那条通知, 所以带外通知不泄漏。
 //
 // 本包只发事件, ⛔ 不投递 —— 投递需要邮件通道, 那是消费者的事。
-type AuditHook func(AuditEvent)
+// ⚠️ 必须带 ctx。本钩子在【请求路径上】被调用, 而消费者几乎一定是写日志 ——
+// 不带 ctx 的日志 TraceId 为空, APM 里跳不回对应的调用链。
+// 而降级类事件恰恰最需要"这是哪一次请求"。
+type AuditHook func(context.Context, AuditEvent)
 
 // LoginOutcome 是登录守卫的结果。
 //
@@ -171,7 +219,7 @@ func (g *Guard) Login(
 	// ⛔ 不是失败。理由与代价都写在 ipUnavailable 那一段, 改之前先读它。
 	ipAvailable := clientIP != ""
 	if !ipAvailable {
-		g.emit("ip_source_unavailable", username, "", now)
+		g.emit(ctx, EventIPSourceUnavailable, username, "", now)
 	}
 
 	// ② IP 维度可以【提前】拒绝, 而账号维度不行 —— 因为 IP 不是凭据内容。
@@ -184,12 +232,12 @@ func (g *Guard) Login(
 	if ipAvailable {
 		if ipState, err := g.ipStore.Peek(ctx, clientIP); err == nil {
 			if g.policy.Blocked(ipState, now) {
-				g.emit("denied", username, clientIP, now)
+				g.emit(ctx, EventDenied, username, clientIP, now)
 				return LoginOutcome{}, newErr(CodeInvalidCredentials, "凭据无效")
 			}
 		} else {
 			// 存储不可用时不阻断登录, 但这是一次静默的防护损失, 必须可见。
-			g.emit("ip_store_unavailable", username, clientIP, now)
+			g.emit(ctx, EventIPStoreUnavailable, username, clientIP, now)
 		}
 	}
 
@@ -225,7 +273,7 @@ func (g *Guard) Login(
 			_ = g.ipStore.Reset(ctx, clientIP)
 		}
 		_ = g.acctStore.Reset(ctx, username)
-		g.emit("allowed", username, clientIP, now)
+		g.emit(ctx, EventAllowed, username, clientIP, now)
 		return LoginOutcome{Allowed: true}, nil
 	}
 
@@ -237,11 +285,11 @@ func (g *Guard) Login(
 			// 若在这里 Bump: 攻击者持续打一个账号, 每次被拒每次计数 +1,
 			// 计数无上限增长、退避窗口指数拉长, 账号被永久锁死。
 			// 那正是这一层想防的东西的反面。
-			g.emit("locked", username, clientIP, now)
+			g.emit(ctx, EventLocked, username, clientIP, now)
 			return LoginOutcome{}, newErr(CodeInvalidCredentials, "凭据无效")
 		}
 	} else {
-		g.emit("acct_store_unavailable", username, clientIP, now)
+		g.emit(ctx, EventAccountStoreUnavailable, username, clientIP, now)
 	}
 
 	// ⑥ 结算。两个维度各记一次。
@@ -258,7 +306,7 @@ func (g *Guard) Login(
 	}
 	_, _ = g.acctStore.Bump(ctx, username, now)
 
-	g.emit("denied", username, clientIP, now)
+	g.emit(ctx, EventDenied, username, clientIP, now)
 	return LoginOutcome{}, newErr(CodeInvalidCredentials, "凭据无效")
 }
 
@@ -267,9 +315,9 @@ func (g *Guard) Admit(ctx context.Context, req AdmitRequest) error {
 	return g.admission.Admit(ctx, req)
 }
 
-func (g *Guard) emit(kind, username, ip string, at time.Time) {
+func (g *Guard) emit(ctx context.Context, kind EventKind, username, ip string, at time.Time) {
 	if g.audit == nil {
 		return
 	}
-	g.audit(AuditEvent{Kind: kind, Username: username, ClientIP: ip, At: at})
+	g.audit(ctx, AuditEvent{Kind: kind, Username: username, ClientIP: ip, At: at})
 }
