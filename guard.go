@@ -31,8 +31,28 @@ const (
 	EventAllowed EventKind = "login.allowed"
 	// EventDenied 凭据类失败 (密码错 / 用户不存在 / 被 IP 维度提前拒)。
 	EventDenied EventKind = "login.denied"
-	// EventLocked 账号处于退避中而被拒。
+	// EventLocked 【账号】维度退避拦截。
+	//
+	// ⚠️ 名字里没有 "account" 是历史包袱 —— 它先于 EventIPBlocked 存在,
+	// 而 EventKind 的值是外部告警规则的匹配键, ⛔ 改名会静默关掉那条规则。
+	// 所以这里保持原样并在注释里说清语义, 而不是为了对称去重命名。
 	EventLocked EventKind = "login.locked"
+
+	// EventIPBlocked 【IP】维度退避拦截。
+	//
+	// ⭐ 它必须与 EventDenied 分开, 理由是【我们自己要看得见】:
+	//
+	// 对外不可区分是刻意的 —— 响应体若能区分"处于退避中"与"密码错误",
+	// 一次探测就能读出"这个用户名近期被试过"。
+	// 但审计日志是【给运维看的内部信号】, 在那里也不可区分就成了缺陷:
+	// 日志流里分不出「有人在爆破」和「用户忘了密码」。
+	//
+	// 早先这条走的是 EventDenied, 于是唯一能看出退避触发的地方是计数表 ——
+	// 那要轮询。有了这个 Kind, 告警就能建在日志流上。
+	//
+	// ⛔ 它【不是】降级信号 (Degraded() 返回 false): 这是防护正在生效,
+	// 不是防护失效。两者混在一起会让"防护正常工作"触发降级告警。
+	EventIPBlocked EventKind = "login.ip_blocked"
 
 	// ⭐ 下面三个是【防护降级】信号 —— 它们存在的全部意义就是被告警。
 	//
@@ -232,7 +252,9 @@ func (g *Guard) Login(
 	if ipAvailable {
 		if ipState, err := g.ipStore.Peek(ctx, clientIP); err == nil {
 			if g.policy.Blocked(ipState, now) {
-				g.emit(ctx, EventDenied, username, clientIP, now)
+				// ⚠️ 事件与 EventDenied 分开, 但【返回值完全一样】——
+				// 可区分的只有内部日志, 对外仍是同一个 CodeInvalidCredentials。
+				g.emit(ctx, EventIPBlocked, username, clientIP, now)
 				return LoginOutcome{}, newErr(CodeInvalidCredentials, "凭据无效")
 			}
 		} else {

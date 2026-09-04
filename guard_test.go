@@ -568,6 +568,7 @@ func TestEventKind_值不可改名(t *testing.T) {
 		EventAllowed:                 "login.allowed",
 		EventDenied:                  "login.denied",
 		EventLocked:                  "login.locked",
+		EventIPBlocked:               "login.ip_blocked",
 		EventIPSourceUnavailable:     "login.ip_source_unavailable",
 		EventIPStoreUnavailable:      "login.ip_store_unavailable",
 		EventAccountStoreUnavailable: "login.account_store_unavailable",
@@ -585,9 +586,12 @@ func TestEventKind_值不可改名(t *testing.T) {
 // 且漏了没有任何症状的地方 (新的降级信号不被认作降级 = 不告警)。
 func TestEventKind_Degraded(t *testing.T) {
 	degraded := map[EventKind]bool{
-		EventAllowed:                 false,
-		EventDenied:                  false,
-		EventLocked:                  false,
+		EventAllowed: false,
+		EventDenied:  false,
+		EventLocked:  false,
+		// ⛔ IP 退避拦截【不是】降级 —— 那是防护正在生效。
+		// 混进降级会让"防护正常工作"触发降级告警。
+		EventIPBlocked:               false,
 		EventIPSourceUnavailable:     true,
 		EventIPStoreUnavailable:      true,
 		EventAccountStoreUnavailable: true,
@@ -601,11 +605,70 @@ func TestEventKind_Degraded(t *testing.T) {
 	// 守卫实际发得出来的 Kind 必须全在上表里 —— 否则这张表是残缺的,
 	// 而残缺的表在加新 Kind 时正好静默漏掉。
 	emitted := []EventKind{
-		EventAllowed, EventDenied, EventLocked,
+		EventAllowed, EventDenied, EventLocked, EventIPBlocked,
 		EventIPSourceUnavailable, EventIPStoreUnavailable, EventAccountStoreUnavailable,
 	}
 	if len(emitted) != len(degraded) {
 		t.Errorf("Kind 清单 %d 项与 Degraded 表 %d 项对不上 —— 有新 Kind 没登记",
 			len(emitted), len(degraded))
+	}
+}
+
+// ⭐ TestLogin_IP退避拦截必须与密码错分开
+//
+// 这条钉的是【可观测性】而不是安全性: 两者对外必须不可区分 (否则泄漏
+// "这个用户名近期被试过"), 但对内必须可区分 (否则日志里分不出
+// 「有人在爆破」和「用户忘了密码」)。
+//
+// ⚠️ 判据是两条一起 —— 只验"事件不同"的话, 一个把退避信息也塞进响应体的
+// 实现同样能通过, 而那正是要防的泄漏。
+func TestLogin_IP退避拦截必须与密码错分开(t *testing.T) {
+	now := time.Date(2026, 9, 4, 12, 0, 0, 0, time.UTC)
+	var events []AuditEvent
+	g := mustGuard(t,
+		WithPolicy(BackoffPolicy{Threshold: 2, Ceiling: 10, DecayInterval: time.Hour}),
+		WithClock(func() time.Time { return now }),
+		WithAuditHook(func(_ context.Context, e AuditEvent) { events = append(events, e) }),
+	)
+	lookup := lookupOf(t, bcrypt.MinCost, map[string]string{"alice": "correct-horse"})
+	ctx := context.Background()
+	const ip = "203.0.113.77"
+
+	// 前两次: 普通凭据失败。
+	var errs []error
+	for i := 0; i < 2; i++ {
+		_, err := g.Login(ctx, ip, "alice", "wrong", lookup)
+		errs = append(errs, err)
+	}
+	// 第三次: IP 已达阈值, 走退避拦截。
+	_, blockedErr := g.Login(ctx, ip, "alice", "wrong", lookup)
+	errs = append(errs, blockedErr)
+
+	// ① 内部事件必须可区分
+	var kinds []EventKind
+	for _, e := range events {
+		kinds = append(kinds, e.Kind)
+	}
+	if len(kinds) != 3 {
+		t.Fatalf("期望 3 条事件, 得到 %v", kinds)
+	}
+	if kinds[0] != EventDenied || kinds[1] != EventDenied {
+		t.Errorf("前两次应当是 %s, 得到 %v", EventDenied, kinds[:2])
+	}
+	if kinds[2] != EventIPBlocked {
+		t.Fatalf("退避拦截应当发 %s 而不是 %s —— "+
+			"否则日志里分不出「有人在爆破」和「用户忘了密码」",
+			EventIPBlocked, kinds[2])
+	}
+
+	// ② ⛔ 对外必须【完全】不可区分
+	for i, err := range errs {
+		if CodeOf(err) != CodeInvalidCredentials {
+			t.Errorf("第 %d 次的错误码是 %q, 应当一律 %q", i+1, CodeOf(err), CodeInvalidCredentials)
+		}
+	}
+	if errs[0].Error() != errs[2].Error() {
+		t.Errorf("退避拦截的错误文本 %q 与密码错的 %q 不同 —— "+
+			"一次探测即可读出「这个用户名近期被试过」", errs[2].Error(), errs[0].Error())
 	}
 }
