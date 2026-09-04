@@ -2,7 +2,6 @@ package localauth
 
 import (
 	"context"
-	"net/http"
 	"time"
 
 	"golang.org/x/crypto/bcrypt"
@@ -148,7 +147,7 @@ func New(
 //
 // 编排顺序如下, 每一步的位置都是有理由的:
 //
-//	① 解析 clientIP —— 失败即拒, ⛔ 不静默回退
+//	① 取 clientIP —— 空串则【降级】(关 IP 维度), 不是失败
 //	② 查 IP 退避 —— 命中则【不烧 bcrypt】直接拒
 //	③ 无条件跑唯一一次 bcrypt
 //	④ 成功优先 —— 密码对就放行并清零, 不受账号退避约束
@@ -156,16 +155,23 @@ func New(
 //	⑥ 结算 —— 两个维度各 Bump 一次
 func (g *Guard) Login(
 	ctx context.Context,
-	r *http.Request,
+	clientIP string,
 	username, password string,
 	lookup LookupFunc,
 ) (LoginOutcome, error) {
 	now := g.now()
 
-	// ① 客户端身份。配错或链路不符时大声失败。
-	clientIP, err := g.ip.ClientIP(r)
-	if err != nil {
-		return LoginOutcome{}, err
+	// ① 客户端身份。
+	//
+	// ⚠️ 解析【不在这一层】—— 它需要 HTTP 头, 而本包的调用方常常隔着一次
+	// RPC (gateway 在边缘解析, user 服务才是跑守卫的地方)。
+	// 所以解析用 ClientIPStrategy 在边缘做一次, 这里只收结果。
+	//
+	// 空串 = 来源不可用 → 【降级】: 关掉 IP 维度, 账号维度照常。
+	// ⛔ 不是失败。理由与代价都写在 ipUnavailable 那一段, 改之前先读它。
+	ipAvailable := clientIP != ""
+	if !ipAvailable {
+		g.emit("ip_source_unavailable", username, "", now)
 	}
 
 	// ② IP 维度可以【提前】拒绝, 而账号维度不行 —— 因为 IP 不是凭据内容。
@@ -175,14 +181,16 @@ func (g *Guard) Login(
 	// 所以这里提前返回不构成差分泄漏, 而它是本层唯一能省下 bcrypt 的地方 ——
 	// ⚠️ 账号维度【不省】CPU, 那是设计使然, 不是遗漏: 提前判定账号
 	// 会造出「被锁的账号返回得快」这个预言机。
-	if ipState, err := g.ipStore.Peek(ctx, clientIP); err == nil {
-		if g.policy.Blocked(ipState, now) {
-			g.emit("denied", username, clientIP, now)
-			return LoginOutcome{}, newErr(CodeInvalidCredentials, "凭据无效")
+	if ipAvailable {
+		if ipState, err := g.ipStore.Peek(ctx, clientIP); err == nil {
+			if g.policy.Blocked(ipState, now) {
+				g.emit("denied", username, clientIP, now)
+				return LoginOutcome{}, newErr(CodeInvalidCredentials, "凭据无效")
+			}
+		} else {
+			// 存储不可用时不阻断登录, 但这是一次静默的防护损失, 必须可见。
+			g.emit("ip_store_unavailable", username, clientIP, now)
 		}
-	} else {
-		// 存储不可用时不阻断登录, 但这是一次静默的防护损失, 必须可见。
-		g.emit("ip_store_unavailable", username, clientIP, now)
 	}
 
 	// ③ bcrypt 的唯一调用点, 支配下面所有凭据相关的返回。
@@ -213,7 +221,9 @@ func (g *Guard) Login(
 	// 那要靠泄漏口令库比对 / MFA / 异常检测。所以这个降级没有让我们
 	// 失去任何原本拥有的东西。
 	if ok {
-		_ = g.ipStore.Reset(ctx, clientIP)
+		if ipAvailable {
+			_ = g.ipStore.Reset(ctx, clientIP)
+		}
 		_ = g.acctStore.Reset(ctx, username)
 		g.emit("allowed", username, clientIP, now)
 		return LoginOutcome{Allowed: true}, nil
@@ -239,7 +249,13 @@ func (g *Guard) Login(
 	// ⚠️ 账号维度对【不存在的用户名】同样记录 —— 否则「有没有被计数」
 	// 本身就泄漏了账号是否存在。这也是键必须是提交上来的字符串
 	// 而不是解析后的用户 id 的原因: 不存在的用户名没有 id。
-	_, _ = g.ipStore.Bump(ctx, clientIP, now)
+	//
+	// ⚠️ IP 不可用时【不得】拿空串当键去 Bump —— 那会把所有来源不明的
+	// 失败堆进同一行, 然后在阈值处把【所有人】一起拒掉。
+	// 一个降级措施变成一次自伤式的全站拒绝服务, 比不做还糟。
+	if ipAvailable {
+		_, _ = g.ipStore.Bump(ctx, clientIP, now)
+	}
 	_, _ = g.acctStore.Bump(ctx, username, now)
 
 	g.emit("denied", username, clientIP, now)

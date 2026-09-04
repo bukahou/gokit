@@ -24,11 +24,10 @@ func mustGuard(t *testing.T, opts ...Option) *Guard {
 	return g
 }
 
-func reqFrom(ip string) *http.Request {
-	r := httptest.NewRequest(http.MethodPost, "/login", nil)
-	r.Header.Set(headerCFConnectingIP, ip)
-	return r
-}
+// ⚠️ Guard.Login 现在收【已解析的】IP 串, 不再自己解析 ——
+// 解析是边缘 (gateway) 的事, 见 ClientIPStrategy 的注释。
+// 保留这个 helper 只是为了让调用处读起来仍然像"来自某个 IP"。
+func reqFrom(ip string) string { return ip }
 
 // lookupOf 造一个只认识 known 里那些用户的 LookupFunc。
 func lookupOf(t *testing.T, cost int, known map[string]string) LookupFunc {
@@ -463,4 +462,90 @@ func TestAdmission(t *testing.T) {
 			t.Error("未命中的域名应当拒绝")
 		}
 	})
+}
+
+// ============ IP 来源不可用时的降级 ============
+
+// ⭐ TestLogin_IP来源不可用时降级而非拒绝
+//
+// 这是一个【明确权衡过】的行为, 不是兜底: 客户端诱发不出这个状态
+// (CF 会覆写同名头, 源站只经 tunnel 可达), 所以降级不构成可利用的绕过;
+// 而拒绝登录会让一个未经生产实测的假设赌上全站可登录性。
+// 完整理由与代价见 ClientIPStrategy 的注释。
+func TestLogin_IP来源不可用时降级而非拒绝(t *testing.T) {
+	var events []AuditEvent
+	g := mustGuard(t, WithAuditHook(func(e AuditEvent) { events = append(events, e) }))
+	lookup := lookupOf(t, bcrypt.MinCost, map[string]string{"alice": "correct-horse"})
+	ctx := context.Background()
+
+	t.Run("正确口令仍然登得进去", func(t *testing.T) {
+		out, err := g.Login(ctx, "" /* IP 不可用 */, "alice", "correct-horse", lookup)
+		if err != nil || !out.Allowed {
+			t.Fatalf("IP 来源不可用不应当阻断登录: out=%v err=%v", out, err)
+		}
+	})
+
+	t.Run("必须发出可告警的审计事件", func(t *testing.T) {
+		var found bool
+		for _, e := range events {
+			if e.Kind == "ip_source_unavailable" {
+				found = true
+			}
+		}
+		if !found {
+			t.Fatal("降级没有发出 ip_source_unavailable —— " +
+				"那样这次防护损失就是完全不可见的, 而不可见的降级等于悄悄关掉一半防护")
+		}
+	})
+}
+
+// ⭐ TestLogin_IP不可用时不得拿空串当计数键
+//
+// 这条防的是一个【自伤式】的失效: 若把空串当成一个正常的键去 Bump,
+// 所有来源不明的失败会堆进同一行, 到阈值之后把【所有人】一起拒掉 ——
+// 一个降级措施变成全站拒绝服务, 比不做还糟。
+func TestLogin_IP不可用时不得拿空串当计数键(t *testing.T) {
+	g := mustGuard(t, WithPolicy(BackoffPolicy{Threshold: 3, Ceiling: 10, DecayInterval: time.Hour}))
+	lookup := lookupOf(t, bcrypt.MinCost, map[string]string{"alice": "correct-horse"})
+	ctx := context.Background()
+
+	// 大量来源不明的失败 —— 远超阈值。
+	for i := 0; i < 20; i++ {
+		_, _ = g.Login(ctx, "", "user"+strconv.Itoa(i), "wrong", lookup)
+	}
+
+	if st, _ := g.ipStore.Peek(ctx, ""); st.Count != 0 {
+		t.Fatalf("空串这一行被计了 %d 次 —— 它会在阈值处把所有来源不明的请求一起拒掉", st.Count)
+	}
+
+	// 而一个全新用户此刻必须仍能登入 (证明没有被那一行连坐)。
+	out, err := g.Login(ctx, "", "alice", "correct-horse", lookup)
+	if err != nil || !out.Allowed {
+		t.Fatalf("来源不明的失败把无关用户也拒了 —— 自伤式失效: out=%v err=%v", out, err)
+	}
+}
+
+// ⭐ TestLogin_IP不可用时账号维度仍然生效
+//
+// 降级只关掉两个维度中的一个。若账号维度也跟着失效, 那就不是降级而是全关。
+func TestLogin_IP不可用时账号维度仍然生效(t *testing.T) {
+	now := time.Date(2026, 9, 4, 12, 0, 0, 0, time.UTC)
+	g := mustGuard(t,
+		WithPolicy(BackoffPolicy{Threshold: 3, Ceiling: 10, DecayInterval: time.Hour}),
+		WithClock(func() time.Time { return now }),
+	)
+	lookup := lookupOf(t, bcrypt.MinCost, map[string]string{"alice": "correct-horse"})
+	ctx := context.Background()
+
+	for i := 0; i < 3; i++ {
+		_, _ = g.Login(ctx, "", "alice", "wrong", lookup)
+	}
+
+	st, _ := g.acctStore.Peek(ctx, "alice")
+	if st.Count != 3 {
+		t.Fatalf("账号维度计数 = %d, 期望 3 —— IP 不可用不应当连累账号维度", st.Count)
+	}
+	if !g.policy.Blocked(st, now) {
+		t.Fatal("账号维度应当已进入退避 —— 否则降级实际上是把两个维度都关了")
+	}
 }
