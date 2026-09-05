@@ -30,12 +30,44 @@ type redisRevocationStore struct {
 	ttl    time.Duration
 }
 
+// ⭐⭐ 请求热路径上的超时 —— 这几个值不是随手填的
+//
+// 吊销判定发生在【每一个已登录请求】上。Redis 挂掉时的正确行为是
+// "立刻放弃并放行"(fail-open), ⛔ 而不是"等着"。
+//
+// # ⚠️ fail-slow 比 fail-open 危险得多
+//
+// 本地实测(2026-09-05, 真的把 Redis 杀掉): 用 go-redis 的默认超时,
+// 单次判定耗时 **1.68 秒**。每个已登录请求都等 1.7 秒意味着:
+// 网关的在途请求数暴涨 → 连接/协程积压 → 整体延迟飙升。
+// 那时"我们是 fail-open 所以没事"这句话已经不成立了 ——
+// ⛔ 请求虽然最终都放行了, 但站点在用户看来就是挂了。
+//
+// ⚠️ 所以这里刻意用【短到有点激进】的值: 判定失败的代价只是
+// 退回"靠 access TTL 兜底"(≤900s), 而多等 1 秒的代价是全站变慢。
+// 两者不在一个量级, 该偏向哪边很清楚。
+//
+// ⛔ 谁要调大这些值, 先回答: Redis 挂掉的那几分钟里,
+// 每个请求多等的时间乘以 QPS, 网关扛得住吗?
+const (
+	revocationDialTimeout  = 300 * time.Millisecond
+	revocationReadTimeout  = 200 * time.Millisecond
+	revocationWriteTimeout = 200 * time.Millisecond
+	// ⚠️ 不重试 —— 重试把上面的超时乘以了倍数, 而这条路径上
+	// "再试一次"换来的成功率, 远不值它带来的尾延迟。
+	revocationMaxRetries = -1 // go-redis: -1 表示不重试
+)
+
 // NewRedisRevocationStore 构造 Redis 实现 (单实例)。
 func NewRedisRevocationStore(redisURL, prefix string, ttl time.Duration) (RevocationStore, error) {
 	opt, err := redis.ParseURL(redisURL)
 	if err != nil {
 		return nil, fmt.Errorf("解析 Redis URL 失败: %w", err)
 	}
+	opt.DialTimeout = revocationDialTimeout
+	opt.ReadTimeout = revocationReadTimeout
+	opt.WriteTimeout = revocationWriteTimeout
+	opt.MaxRetries = revocationMaxRetries
 	return newPingedRevocationStore(redis.NewClient(opt), prefix, ttl)
 }
 
@@ -50,6 +82,13 @@ func NewRedisSentinelRevocationStore(
 		MasterName:    masterName,
 		SentinelAddrs: sentinelAddrs,
 		DB:            db,
+		// ⚠️ 与单实例用同一组超时 —— 见上方常量的注释。
+		// ⛔ Sentinel 模式下更要短: 主节点失联时客户端还要去问哨兵,
+		// 默认超时会让这段"问路"时间叠加到每一个请求上。
+		DialTimeout:  revocationDialTimeout,
+		ReadTimeout:  revocationReadTimeout,
+		WriteTimeout: revocationWriteTimeout,
+		MaxRetries:   revocationMaxRetries,
 	}), prefix, ttl)
 }
 
