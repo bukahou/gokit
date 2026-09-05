@@ -550,3 +550,58 @@ func TestRotateOutcome_零值是最保守的那一侧(t *testing.T) {
 		t.Error("⛔ 零值不得是 Replayed(有破坏力) 或 Rotated(等于放行)")
 	}
 }
+
+// TestRefresh_改密判据必须是Before而不是不After ⭐ 钉死一个【裕度为零】的语义。
+//
+// # 为什么这条值得单独测
+//
+// §7.7 判据: session.CreatedAt.Before(PasswordChangedAt) → 失效。
+//
+// 改密流程是"吊销全部 → 立即为当前设备重签"。重签出的会话 CreatedAt
+// 与 password_changed_at 相隔【几毫秒】, 而 DB 的 datetime 是秒精度 ——
+// 截断之后两者【相等】。实测(真库, 连跑 5 次)每一次都相等。
+//
+// ⛔ 所以"相等不算失效"是重签会话能活下来的【唯一依据】, 裕度是零。
+// 谁把判据改成 `!After`(让相等也算失效), 每一个重签出来的会话都会当场作废,
+// 症状是"改完密码立刻掉线" —— 100% 复现, 而改判据的人多半以为
+// 自己只是"把边界收严一点"。
+//
+// ⚠️ 端到端那条测试(internal/user/service)能覆盖这个, 但它要 DSN,
+// CI 会跳过。所以这条必须在这里, 用内存 store 也能跑。
+func TestRefresh_改密判据必须是Before而不是不After(t *testing.T) {
+	fixed := time.Date(2026, 9, 5, 12, 0, 0, 0, time.UTC)
+
+	// ⭐ 会话创建时刻与改密时刻【完全相等】—— 模拟秒精度截断后的真实情形。
+	status := func(context.Context, string) (AccountStatus, error) {
+		return AccountStatus{Active: true, PasswordChangedAt: fixed}, nil
+	}
+	g, _ := newSessionGuard(t, status, WithSessionClock(func() time.Time { return fixed }))
+	ctx := context.Background()
+
+	tok, rec, err := g.Issue(ctx, SessionRecord{UserID: "u1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !rec.CreatedAt.Equal(fixed) {
+		t.Fatalf("前提不成立: 会话 CreatedAt=%v 应等于 %v", rec.CreatedAt, fixed)
+	}
+
+	if _, err := g.Refresh(ctx, tok); err != nil {
+		t.Fatalf("⛔⛔ CreatedAt 与 PasswordChangedAt 相等时会话被判失效 —— "+
+			"改密后重签出的会话与改密时刻【总是】落在同一秒, "+
+			"这会让每一次改密都以'立刻掉线'收场: %v", err)
+	}
+
+	// ⭐ 而真正早于改密时刻的, 必须失效 —— 这条是另一侧, 不能一起放松。
+	older := func(context.Context, string) (AccountStatus, error) {
+		return AccountStatus{Active: true, PasswordChangedAt: fixed.Add(time.Second)}, nil
+	}
+	g2, _ := newSessionGuard(t, older, WithSessionClock(func() time.Time { return fixed }))
+	tok2, _, err := g2.Issue(ctx, SessionRecord{UserID: "u2"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := g2.Refresh(ctx, tok2); CodeOf(err) != CodeInvalidCredentials {
+		t.Errorf("⛔ 建立于改密【之前】的会话必须失效, got %v", err)
+	}
+}
