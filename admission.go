@@ -85,3 +85,8 @@ func (a admitDomains) Admit(_ context.Context, req AdmitRequest) error {
 	}
 	return newErr(CodeAdmissionDenied, "邮箱域名不在允许列表内")
 }
+
+// AdmissionFunc 让一个函数直接充当 Admission (测试与简单策略用)。
+type AdmissionFunc func(ctx context.Context, req AdmitRequest) error
+
+func (f AdmissionFunc) Admit(ctx context.Context, req AdmitRequest) error { return f(ctx, req) }

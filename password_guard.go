@@ -273,29 +273,10 @@ func (g *PasswordGuard) Change(ctx context.Context, req ChangeRequest) (ChangeOu
 		}
 	}
 
-	// ④ 长度 —— 本地规则先行, 省一次外网往返
-	// ⚠️ 长度校验与哈希【共用 hashWithCost 里那一份规则】——
-	// 在这里先判一次只是为了【省掉一次外网往返】(泄露检查在 ⑤),
-	// ⛔ 不是第二份规则。真正的把关在 ⑥。
-	if len(req.NewPassword) < g.minLen || len(req.NewPassword) > MaxPasswordBytes {
-		// 走一次 hashWithCost 拿到精确的错误码与文案, ⛔ 不自己拼。
-		if _, err := hashWithCost(req.NewPassword, bcrypt.MinCost, g.minLen); err != nil {
-			return ChangeOutcome{}, err
-		}
-	}
-
-	// ⑤ 泄露评估 —— ⭐ 警告放行, 不中断 (用户裁决 2026-09-05)
-	advice := g.policy.EvaluateNewPassword(ctx, req.NewPassword)
-
-	// ⑥ 写入 (hash + changedAt 必须同一条语句, 见 CredentialStore 注释)
-	hash, err := hashWithCost(req.NewPassword, g.cost, g.minLen)
+	// ④⑤⑥ 长度 → 泄露评估 → 哈希 → 写 hash + changedAt (与 ResetWithProof 共用)
+	advice, changedAt, err := g.applyNewPassword(ctx, req.UserID, req.NewPassword)
 	if err != nil {
 		return ChangeOutcome{}, err
-	}
-	changedAt := g.now()
-	if err := g.creds.SaveCredential(ctx, req.UserID, hash, changedAt); err != nil {
-		// 无副作用: 单条语句要么全成要么全不成。
-		return ChangeOutcome{}, wrapErr(CodeLookupUnavailable, "保存新口令失败", err)
 	}
 
 	kind := EventPasswordChanged
@@ -305,32 +286,16 @@ func (g *PasswordGuard) Change(ctx context.Context, req ChangeRequest) (ChangeOu
 
 	// ⑦ 吊销全部 —— ⚠️ 失败不回滚 ⑥
 	out := ChangeOutcome{Advice: advice}
-	n, revErr := g.sessions.RevokeAll(ctx, req.UserID)
-	out.RevokedCount = n
-	if revErr != nil {
-		// ⛔ 这条必须是 ERROR 级: 口令已改但旧会话还活着,
-		// 需要人介入确认 §7.7 是否兜住了(它应该兜住, 但"应该"不等于"确认")。
-		g.emitPassword(ctx, EventPasswordRevokeFailed, req.UserID, changedAt,
-			"口令已更新但吊销会话失败: "+revErr.Error())
-	}
+	out.RevokedCount = g.revokeAll(ctx, req.UserID, changedAt)
 
 	// ⑦.5 ⭐ 推进吊销纪元 —— 让已签发的 access token 立即失效。
 	//
 	// # ⭐ 纪元的值必须是 changedAt, 不是"写入的那一刻"
 	//
-	// 这一条才是这里唯一要紧的事。changedAt 在 ⑥ 之前就取好了,
-	// 而 ⑧ 重签出的 access token 其 iat 必然 >= changedAt ——
+	// changedAt 在 ⑥ 之前就取好了, 而 ⑧ 重签出的 access token 其 iat 必然 >= changedAt ——
 	// ⛔ 所以新 token 不会被自己作废, 且这与 ⑦.5 和 ⑧ 谁先谁后【无关】。
-	//
-	// ⚠️ 若改成在这里现取 now(), 就产生了一个真实的竞态:
-	// now() 可能晚于 ⑧ 里 token 的签发时刻(如果顺序调换), 新 token 当场作废。
-	// 用 changedAt 让这件事在【取值层面】就不可能, 而不是靠语句顺序维持。
-	//
-	// ⚠️ 顺序上仍然放在重签之前, 但理由是另一个: 若进程在两步之间崩溃,
-	// "已吊销但没重签"(用户重登一次)比"已重签但没吊销"(旧 token 还活着)好。
-	//
-	// ⚠️ 失败不中断 —— 只丢"立刻生效"这一层, §7.7 与会话吊销仍然
-	// 保证"下一次 refresh 时生效"。两层是及时性与正确性的分工。
+	// ⚠️ 用 Revoke 而不是 RevokeIssuedThrough: 后者会把同一秒签出的新 token 当场作废。
+	// 顺序上仍放在重签之前: 若进程在两步之间崩溃, "已吊销但没重签"好过"已重签但没吊销"。
 	if g.revoker != nil {
 		if err := g.revoker.Revoke(ctx, req.UserID, changedAt); err != nil {
 			g.emitPassword(ctx, EventRevocationWriteFailed, req.UserID, changedAt, err.Error())
@@ -339,33 +304,106 @@ func (g *PasswordGuard) Change(ctx context.Context, req ChangeRequest) (ChangeOu
 
 	// ⑧ 重签当前设备
 	if req.CurrentSessionID != "" {
-		tok, rec, issueErr := g.sessions.Issue(ctx, SessionRecord{
-			UserID:     req.UserID,
-			DeviceInfo: req.DeviceInfo,
-			ClientIP:   req.ClientIP,
-		})
+		re, issueErr := g.reissuer().Reissue(ctx, req.UserID, req.DeviceInfo, req.ClientIP)
 		if issueErr != nil {
 			// ⚠️ 不是致命错误: 口令改好了, 只是用户得重新登录。
-			// 调用方据 NewRefreshToken 为空判断并调整前端提示。
-			g.emitPassword(ctx, EventPasswordReissueFailed, req.UserID, changedAt,
-				issueErr.Error())
+			g.emitPassword(ctx, EventPasswordReissueFailed, req.UserID, changedAt, issueErr.Error())
 		} else {
-			out.NewRefreshToken, out.NewSession = tok, rec
-			// ⭐ 顺带签一张 access token, 让前端【零往返】继续用。
-			// ⚠️ 签发失败不中断 —— 前端拿 refresh 换一次即可。
-			if g.issuer != nil {
-				at, exp, atErr := g.issuer(ctx, req.UserID, rec.ID)
-				if atErr != nil {
-					g.emitPassword(ctx, EventPasswordReissueFailed, req.UserID, changedAt,
-						"refresh 已重签但 access token 签发失败: "+atErr.Error())
-				} else {
-					out.NewAccessToken, out.NewAccessExpiresAt = at, exp
-				}
+			out.NewRefreshToken, out.NewSession = re.RefreshToken, re.Session
+			out.NewAccessToken, out.NewAccessExpiresAt = re.AccessToken, re.AccessExpiresAt
+			if re.AccessErr != nil {
+				g.emitPassword(ctx, EventPasswordReissueFailed, req.UserID, changedAt,
+					"refresh 已重签但 access token 签发失败: "+re.AccessErr.Error())
 			}
 		}
 	}
 
-	g.emitPassword(ctx, kind, req.UserID, changedAt, "已吊销 "+itoa(n)+" 条会话")
+	g.emitPassword(ctx, kind, req.UserID, changedAt, "已吊销 "+itoa(out.RevokedCount)+" 条会话")
+	return out, nil
+}
+
+// applyNewPassword 是 Change 与 ResetWithProof 共用的核心: 长度 → 泄露评估 → 哈希 → 落库。
+//
+// ⚠️ hash 与 changedAt 由 CredentialStore 在同一条语句里写 —— 见其契约注释。
+func (g *PasswordGuard) applyNewPassword(ctx context.Context, userID, newPassword string) (PasswordAdvice, time.Time, error) {
+	// ⚠️ 长度校验与哈希【共用 hashWithCost 里那一份规则】—— 这里先判一次只是为了
+	// 省掉一次外网往返 (泄露检查), ⛔ 不是第二份规则。真正的把关在下面的哈希。
+	if len(newPassword) < g.minLen || len(newPassword) > MaxPasswordBytes {
+		if _, err := hashWithCost(newPassword, bcrypt.MinCost, g.minLen); err != nil {
+			return PasswordAdvice{}, time.Time{}, err
+		}
+	}
+	advice := g.policy.EvaluateNewPassword(ctx, newPassword) // ⭐ 警告放行 (用户裁决)
+	hash, err := hashWithCost(newPassword, g.cost, g.minLen)
+	if err != nil {
+		return PasswordAdvice{}, time.Time{}, err
+	}
+	changedAt := g.now()
+	if err := g.creds.SaveCredential(ctx, userID, hash, changedAt); err != nil {
+		return PasswordAdvice{}, time.Time{}, wrapErr(CodeLookupUnavailable, "保存新口令失败", err)
+	}
+	return advice, changedAt, nil
+}
+
+// revokeAll 吊销全部会话, 失败只留痕 (口令已改, 回滚更糟)。
+func (g *PasswordGuard) revokeAll(ctx context.Context, userID string, at time.Time) int {
+	n, err := g.sessions.RevokeAll(ctx, userID)
+	if err != nil {
+		// ⛔ ERROR 级: 口令已改但旧会话还活着, 需要人确认 §7.7 是否兜住了。
+		g.emitPassword(ctx, EventPasswordRevokeFailed, userID, at, "口令已更新但吊销会话失败: "+err.Error())
+	}
+	return n
+}
+
+func (g *PasswordGuard) reissuer() *DeviceReissuer {
+	return NewDeviceReissuer(g.sessions, g.issuer)
+}
+
+// ResetRequest 凭验证码重置口令 (找回密码, §18 ④)。
+type ResetRequest struct {
+	UserID      string
+	NewPassword string
+}
+
+// ResetWithProof 凭已校验的验证码重置口令 —— 【不验旧口令】。
+//
+// # ⭐ 跳过旧口令是凭 proof, ⛔ 不是凭 OldPassword 为空
+//
+// Change 里 "OldPassword 为空可通过" 的判据是【库里没有 hash】(首次设密)。
+// 找回是另一种合法的跳过, 依据是"用户刚证明了自己拥有已验证的恢复地址"——
+// 那个证明就是 VerifiedProof, 它只能从 VerificationGuard.Verify 拿到。
+// 两种跳过必须是两个方法: 混在一起, 任何一处的判据放松都会波及另一处。
+//
+// # 与 Change 的差异
+//
+//	· 不验旧口令 (凭 proof)
+//	· 纯 OIDC 账号 (无 hash) 拒绝 —— 找回不能给账号【凭空装上】口令, 那是 ⑥ 的事且要登录态
+//	· 纪元用 RevokeIssuedThrough —— 没有要保住的 token (用户没有会话), 连此刻一起杀
+//	· 不重签 —— 让用户用新口令登录
+func (g *PasswordGuard) ResetWithProof(ctx context.Context, req ResetRequest, proof VerifiedProof) (ChangeOutcome, error) {
+	if !proof.valid() || proof.Purpose != PurposeRecoverPassword || proof.Subject != req.UserID {
+		// ⛔ 一个不匹配的 proof 与没有 proof 是一回事。
+		return ChangeOutcome{}, newErr(CodeInvalidCredentials, "凭据无效")
+	}
+	cred, found, err := g.creds.LoadCredential(ctx, req.UserID)
+	if err != nil {
+		return ChangeOutcome{}, wrapErr(CodeLookupUnavailable, "读取凭证失败", err)
+	}
+	if !found || !cred.Active || cred.Hash == "" {
+		return ChangeOutcome{}, newErr(CodeInvalidCredentials, "凭据无效")
+	}
+	advice, changedAt, err := g.applyNewPassword(ctx, req.UserID, req.NewPassword)
+	if err != nil {
+		return ChangeOutcome{}, err
+	}
+	out := ChangeOutcome{Advice: advice}
+	out.RevokedCount = g.revokeAll(ctx, req.UserID, changedAt)
+	if g.revoker != nil {
+		if err := g.revoker.RevokeIssuedThrough(ctx, req.UserID, changedAt); err != nil {
+			g.emitPassword(ctx, EventRevocationWriteFailed, req.UserID, changedAt, err.Error())
+		}
+	}
+	g.emitPassword(ctx, EventPasswordReset, req.UserID, changedAt, "已吊销 "+itoa(out.RevokedCount)+" 条会话")
 	return out, nil
 }
 

@@ -46,6 +46,19 @@ const (
 
 	// CodeMisconfigured 构造参数缺失或非法。构造期返回, 服务不启动。
 	CodeMisconfigured Code = "misconfigured"
+
+	// ⭐ 批次四 (验证码流程)。
+
+	// CodeTooManyRequests 发码限流。⚠️ 按地址/IP 计数, 与账号是否存在无关 —— 不泄漏。
+	CodeTooManyRequests Code = "too_many_requests"
+	// CodeInvalidCode 验证码无效。⚠️ 「根本没有 / 码错 / 已过期 / 试太多次」对外都是它。
+	CodeInvalidCode Code = "invalid_code"
+	// CodeUsernameTaken 用户名已存在 (用户名本来就公开, 明说无妨)。
+	CodeUsernameTaken Code = "username_taken"
+	// CodeEmailTaken 邮箱已被占用。⚠️ 只在【建号写入】撞唯一索引时返回 ——
+	// 发码阶段对已占邮箱是静默成功 (防枚举), 这里能返回是因为用户已经通过了验码,
+	// 也就是证明了自己是这个邮箱的主人。
+	CodeEmailTaken Code = "email_taken"
 )
 
 // Error 是本包对外的错误类型。消费者用 errors.As 取出 Code 做映射。
@@ -65,6 +78,12 @@ func (e *Error) Error() string {
 func (e *Error) Unwrap() error { return e.cause }
 
 func newErr(code Code, msg string) *Error { return &Error{Code: code, Msg: msg} }
+
+// NewError 供宿主的存储实现构造带 Code 的错误 (如唯一冲突 → CodeEmailTaken)。
+//
+// ⚠️ 只给存储适配层用。业务规则的错误应当由模块自己产生, 宿主不该替模块决定
+// "这算不算凭据无效"。
+func NewError(code Code, msg string) error { return &Error{Code: code, Msg: msg} }
 
 func wrapErr(code Code, msg string, cause error) *Error {
 	return &Error{Code: code, Msg: msg, cause: cause}
