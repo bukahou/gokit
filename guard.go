@@ -138,6 +138,27 @@ const (
 	//
 	// ⚠️ WARN 而非 ERROR: 用户重新登录即可, 没有安全后果。
 	EventPasswordReissueFailed EventKind = "password.reissue_failed"
+
+	// ⭐ 吊销纪元 (批次三 D1)。
+
+	// EventRevocationCheckUnavailable ⭐ 吊销纪元查不了, 已 fail-open 放行。
+	//
+	// ⚠️⚠️ 与 password.breach_check_unavailable 是同一族: fail-open 的代价凭证。
+	//
+	// ⛔ 没有它, Redis 挂掉之后"改密/封禁立即生效"会静默退化成
+	// "最长 900 秒后生效", 而表现与一切正常完全一样 —— 没有报错,
+	// 没有拒绝, 用户照常使用。这正是最难发现的那类失效。
+	//
+	// WARN 级, 聚合超阈值即告警。
+	EventRevocationCheckUnavailable EventKind = "session.revocation_check_unavailable"
+
+	// EventRevocationWriteFailed 吊销纪元没写进去。
+	//
+	// ⚠️ WARN 而非 ERROR: 写失败只丢"立刻生效"这一层,
+	// 而 §7.7 与会话吊销仍然保证"下一次 refresh 时生效" ——
+	// 两层是【及时性】与【正确性】的分工, 丢上层不致命。
+	// ⛔ 但也不能不记: 持续写失败意味着封禁始终要等 900 秒才生效。
+	EventRevocationWriteFailed EventKind = "session.revocation_write_failed"
 )
 
 // AllEventKinds 列出全部事件类型。
@@ -172,6 +193,8 @@ func AllEventKinds() []EventKind {
 		EventPasswordInitialized,
 		EventPasswordRevokeFailed,
 		EventPasswordReissueFailed,
+		EventRevocationCheckUnavailable,
+		EventRevocationWriteFailed,
 	}
 }
 

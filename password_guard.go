@@ -75,6 +75,12 @@ type PasswordGuard struct {
 	audit    AuditHook
 	now      func() time.Time
 	issuer   AccessTokenIssuer
+	// revoker 推进吊销纪元, 让【已签发的 access token】立即失效。
+	//
+	// ⚠️ 没有它, 改密只对 refresh 侧立即生效(§7.7), 而旧的 access token
+	// 仍能用满 TTL(默认 900 秒)。⛔ 那意味着"改密踢掉攻击者"这件事
+	// 有一个 15 分钟的窗口 —— 而攻击者恰恰在那个窗口里最活跃。
+	revoker *RevocationChecker
 }
 
 // ChangeRequest 是一次改密/设密请求。
@@ -140,6 +146,13 @@ func WithPasswordMinLen(n int) PasswordGuardOption {
 // 前端仍需用 refresh 换一次 —— 可用但多一次往返。
 func WithAccessTokenIssuer(f AccessTokenIssuer) PasswordGuardOption {
 	return func(g *PasswordGuard) { g.issuer = f }
+}
+
+// WithPasswordRevoker 让改密同时推进吊销纪元 (批次三 D1)。
+//
+// ⚠️ 不传 = 改密只对 refresh 侧立即生效, access token 要等 TTL 到期。
+func WithPasswordRevoker(r *RevocationChecker) PasswordGuardOption {
+	return func(g *PasswordGuard) { g.revoker = r }
 }
 
 // WithPasswordAudit 接住审计事件。
@@ -299,6 +312,29 @@ func (g *PasswordGuard) Change(ctx context.Context, req ChangeRequest) (ChangeOu
 		// 需要人介入确认 §7.7 是否兜住了(它应该兜住, 但"应该"不等于"确认")。
 		g.emitPassword(ctx, EventPasswordRevokeFailed, req.UserID, changedAt,
 			"口令已更新但吊销会话失败: "+revErr.Error())
+	}
+
+	// ⑦.5 ⭐ 推进吊销纪元 —— 让已签发的 access token 立即失效。
+	//
+	// # ⭐ 纪元的值必须是 changedAt, 不是"写入的那一刻"
+	//
+	// 这一条才是这里唯一要紧的事。changedAt 在 ⑥ 之前就取好了,
+	// 而 ⑧ 重签出的 access token 其 iat 必然 >= changedAt ——
+	// ⛔ 所以新 token 不会被自己作废, 且这与 ⑦.5 和 ⑧ 谁先谁后【无关】。
+	//
+	// ⚠️ 若改成在这里现取 now(), 就产生了一个真实的竞态:
+	// now() 可能晚于 ⑧ 里 token 的签发时刻(如果顺序调换), 新 token 当场作废。
+	// 用 changedAt 让这件事在【取值层面】就不可能, 而不是靠语句顺序维持。
+	//
+	// ⚠️ 顺序上仍然放在重签之前, 但理由是另一个: 若进程在两步之间崩溃,
+	// "已吊销但没重签"(用户重登一次)比"已重签但没吊销"(旧 token 还活着)好。
+	//
+	// ⚠️ 失败不中断 —— 只丢"立刻生效"这一层, §7.7 与会话吊销仍然
+	// 保证"下一次 refresh 时生效"。两层是及时性与正确性的分工。
+	if g.revoker != nil {
+		if err := g.revoker.Revoke(ctx, req.UserID, changedAt); err != nil {
+			g.emitPassword(ctx, EventRevocationWriteFailed, req.UserID, changedAt, err.Error())
+		}
 	}
 
 	// ⑧ 重签当前设备
