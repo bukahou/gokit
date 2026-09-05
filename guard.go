@@ -159,6 +159,42 @@ const (
 	// 两层是【及时性】与【正确性】的分工, 丢上层不致命。
 	// ⛔ 但也不能不记: 持续写失败意味着封禁始终要等 900 秒才生效。
 	EventRevocationWriteFailed EventKind = "session.revocation_write_failed"
+
+	// ⭐ 验证码流程 (批次四)。
+
+	// EventVerificationThrottled 发码被限流。INFO —— 正常防护动作。
+	EventVerificationThrottled EventKind = "verification.throttled"
+	// EventVerificationThrottleUnavailable 计数存储不可用, 已放行 (fail-open 的代价凭证)。WARN。
+	EventVerificationThrottleUnavailable EventKind = "verification.throttle_unavailable"
+	// EventVerificationIPUnavailable 来源 IP 不可信, 只做了地址维度限流。WARN。
+	EventVerificationIPUnavailable EventKind = "verification.ip_unavailable"
+	// EventVerificationSendFailed ⭐ 异步投递失败。
+	//
+	// ⚠️⚠️ 这是找回/注册【唯一】的失败可见性: 投递是异步的, 用户看不到失败
+	// (告诉他就等于告诉他邮箱存在)。⛔ 没有它, 发信可以坏三个月没人知道。WARN。
+	EventVerificationSendFailed EventKind = "verification.send_failed"
+	// EventVerificationCodeMismatch 码不对 (计 attempts)。DEBUG —— 用户输错是正常流程。
+	EventVerificationCodeMismatch EventKind = "verification.code_mismatch"
+	// EventVerificationExhausted 同一个码试到上限被作废。INFO —— 在线猜码的信号。
+	EventVerificationExhausted EventKind = "verification.exhausted"
+	// EventVerificationConsumeFailed 业务写入已成功但码没消费掉。WARN (码在 TTL 内可再用, 各流程已论证无害)。
+	EventVerificationConsumeFailed EventKind = "verification.consume_failed"
+
+	// EventAccountRegistered 新账号建立。INFO。
+	EventAccountRegistered EventKind = "account.registered"
+	// EventRecoveryAddressChanged ⭐ 找回完成时发现码发往的地址已不是当前已验证地址。
+	//
+	// ⚠️ WARN —— 这正是 2026-09-05 实测接管链的形状 (先换恢复地址再申请找回)。
+	EventRecoveryAddressChanged EventKind = "recovery.address_changed"
+	// EventPasswordReset 凭验证码重置了口令 (非登录态)。INFO。
+	EventPasswordReset EventKind = "password.reset"
+	// EventEmailChanged 邮箱已改, 旧会话已吊销。INFO。
+	EventEmailChanged EventKind = "email.changed"
+	// EventEmailNotifyFailed ⭐ 没能通知旧地址。
+	//
+	// ⚠️ WARN —— 通知旧地址是唯一让受害者知道"恢复地址被改了"的渠道。
+	// 没有这条留痕, 接管链只是从"无声"变成"有声但没人听"。
+	EventEmailNotifyFailed EventKind = "email.notify_failed"
 )
 
 // AllEventKinds 列出全部事件类型。
@@ -195,6 +231,18 @@ func AllEventKinds() []EventKind {
 		EventPasswordReissueFailed,
 		EventRevocationCheckUnavailable,
 		EventRevocationWriteFailed,
+		EventVerificationThrottled,
+		EventVerificationThrottleUnavailable,
+		EventVerificationIPUnavailable,
+		EventVerificationSendFailed,
+		EventVerificationCodeMismatch,
+		EventVerificationExhausted,
+		EventVerificationConsumeFailed,
+		EventAccountRegistered,
+		EventRecoveryAddressChanged,
+		EventPasswordReset,
+		EventEmailChanged,
+		EventEmailNotifyFailed,
 	}
 }
 
