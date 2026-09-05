@@ -34,6 +34,16 @@ func (m *memRevocationStore) SaveEpoch(_ context.Context, id string, at time.Tim
 	if m.fail {
 		return errors.New("redis 炸了")
 	}
+	// ⚠️⚠️ 必须【截断到整秒】—— Redis 实现存的是 epoch.Unix(), 亚秒部分丢失。
+	//
+	// ⛔ 我第一版没截断, 于是这个 fake 保留了亚秒精度, 而那正好【掩盖】了
+	// 一个只在生产出现的缺陷: 封禁写 13:00:14.7, Redis 存成 13:00:14,
+	// 同一秒签发的 token(iat=13:00:14) 因"相等不算失效"而幸存。
+	// 内存 store 里 13:00:14 < 13:00:14.7 成立, 所以测试是绿的。
+	//
+	// ⭐ fake 的精度必须与真实存储一致, 否则它掩盖的恰恰是精度类缺陷 ——
+	// 而那类缺陷只会在生产被发现。
+	at = at.Truncate(time.Second)
 	// ⭐ 只前进不后退 —— 与 Redis 实现的 Lua 脚本语义一致。
 	if cur, ok := m.epochs[id]; ok && !at.After(cur) {
 		return nil
@@ -167,4 +177,66 @@ func TestRevocation_未配置时永远放行且不panic(t *testing.T) {
 	if err := c.Revoke(context.Background(), "u1", time.Now()); err != nil {
 		t.Errorf("未配置时 Revoke 应当无操作且不报错: %v", err)
 	}
+}
+
+// TestRevocation_同一秒签发的token必须被封禁杀掉 ⭐ 一个生产实测才发现的 1 秒窗口。
+//
+// # 现象 (生产实测 2026-09-05)
+//
+//	同一秒内登录+封禁 → access token 返回 200 ⛔ 幸存, 然后活满 900 秒
+//	相隔 3 秒         → 401 ✅
+//
+// 成因: JWT 的 iat 是秒精度, 判定是 `iat < epoch`("相等不算失效")。
+// 而"相等不算失效"是【改密重签】赖以存活的性质 —— 不能为了封禁去掉它。
+//
+// ⭐ 出路是让封禁把纪元推到【下一秒的起点】, 于是当前这一秒里签发的
+// 全部 token 都严格早于纪元。两个调用点的需求本来就不同:
+//
+//	改密: 杀掉此刻【之前】的      (要保住马上要签的那张)
+//	封禁: 连此刻【一起】杀掉      (没有要保住的东西)
+//
+// # ⛔⛔ 这两个方法【不能合并】—— 本测试就是那道闸
+//
+// 它们的实现只差一个 `.Add(time.Second)`, 所以下一个人看到"两个几乎
+// 一样的吊销方法"很可能顺手合并成一个。⚠️ 合并即复活这个 1 秒窗口:
+//   - 都用 Revoke      → 封禁漏掉同一秒签发的 token
+//   - 都用 Through     → 改密后重签出的 token 当场作废(立刻掉线)
+//
+// ⭐ 下面两个子测试各守一侧, 合并之后【必然有一个变红】。
+func TestRevocation_同一秒签发的token必须被封禁杀掉(t *testing.T) {
+	store := newMemRevocationStore()
+	c := NewRevocationChecker(store)
+	ctx := context.Background()
+
+	// ⚠️ 模拟真实时序: token 在 .2 秒签发(iat 截断成整秒), 封禁在 .7 秒。
+	sec := time.Date(2026, 9, 5, 13, 0, 14, 0, time.UTC)
+	tokenIAT := sec // JWT 的 iat 是整秒
+	banAt := sec.Add(700 * time.Millisecond)
+
+	t.Run("ⓘ Revoke 的语义就是『严格早于』, 同一秒会幸存", func(t *testing.T) {
+		// ⚠️ 这【不是】bug, 而是改密重签赖以存活的性质。
+		// 记在这里是为了让下一个人看到两个方法为什么必须分开。
+		if err := c.Revoke(ctx, "leak", banAt); err != nil {
+			t.Fatal(err)
+		}
+		if c.IsRevoked(ctx, "leak", tokenIAT) {
+			t.Error("⛔ Revoke 把同一秒签发的 token 也杀了 —— " +
+				"那会让改密后重签出的 token 当场作废(改完密码立刻掉线)")
+		}
+	})
+
+	t.Run("⭐ RevokeIssuedThrough 必须杀掉它", func(t *testing.T) {
+		if err := c.RevokeIssuedThrough(ctx, "banned", banAt); err != nil {
+			t.Fatal(err)
+		}
+		if !c.IsRevoked(ctx, "banned", tokenIAT) {
+			t.Fatal("⛔⛔ 与封禁【同一秒】签发的 token 幸存了 —— " +
+				"它会活满整个 access TTL(900 秒), " +
+				"而封禁这个动作的语义是『现在就把他挡在外面』")
+		}
+		// ⭐ 但下一秒签发的必须放行 —— 否则解封后立刻登录会被误杀
+		if c.IsRevoked(ctx, "banned", sec.Add(time.Second)) {
+			t.Error("⛔ 下一秒签发的 token 被误杀 —— 解封后立刻登录会登不进去")
+		}
+	})
 }
