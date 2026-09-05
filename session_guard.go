@@ -281,7 +281,9 @@ func (g *SessionGuard) emitSession(ctx context.Context, kind EventKind, userID s
 	if g.audit == nil {
 		return
 	}
-	g.audit(ctx, AuditEvent{Kind: kind, Username: userID, At: at, Detail: sessionDetail(revoked, revErr)})
+	// ⭐ 填 UserID 而不是 Username —— 刷新路径上没有用户名, 只有会话记录。
+	// ⛔ 塞进 Username 会让日志里出现 username="<uuid>", 按用户名查不到。
+	g.audit(ctx, AuditEvent{Kind: kind, UserID: userID, At: at, Detail: sessionDetail(revoked, revErr)})
 }
 
 func sessionDetail(revoked int, err error) string {

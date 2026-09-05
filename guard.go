@@ -144,12 +144,28 @@ func (k EventKind) Degraded() bool {
 
 // AuditEvent 是守卫发出的审计事件。消费者决定怎么处理。
 type AuditEvent struct {
-	Kind     EventKind
+	Kind EventKind
+
+	// Username 是【用户提交的登录标识】—— 登录类事件填它。
+	//
+	// ⚠️ 会话类事件填的是 UserID 而不是这里: 刷新时手上只有会话记录,
+	// 根本没有用户名。⛔ 曾经把 UserID 塞进本字段, 于是日志里
+	// username="01a06f96-1dd6-..." —— 按用户名查什么都查不到。
 	Username string
+
+	// UserID 是内部主键。⭐ 会话类事件用它。
+	UserID string
+
 	ClientIP string
 	At       time.Time
-	// Detail 是可选的补充说明 (如"已吊销 N 条会话")。
+
+	// Detail 是可选的补充说明 (如"已吊销 N 条会话" / "吊销失败: ...")。
 	// ⛔ 不得放任何凭证或其哈希。
+	//
+	// ⚠️⚠️ 消费者【必须】把它记进日志。2026-09-05 生产实测它被整个丢掉了,
+	// 后果不只是少一个数字: sessionDetail 用这个字段传递【吊销失败】——
+	// 重放检测判定成立却没能吊销成功, 意味着攻击者那条链还活着,
+	// 而这个失败当时在日志里完全不可见。
 	Detail string
 }
 
