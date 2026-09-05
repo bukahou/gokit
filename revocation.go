@@ -132,7 +132,40 @@ func (c *RevocationChecker) emitRevocation(ctx context.Context, kind EventKind, 
 	c.audit(ctx, AuditEvent{Kind: kind, UserID: userID, At: c.now(), Detail: detail})
 }
 
+// RevokeIssuedThrough 吊销【包括当前这一秒在内】签发的全部 token。
+//
+// # ⚠️⚠️ 为什么需要它 —— 一个用生产实测才发现的 1 秒窗口
+//
+// JWT 的 iat 是【秒】精度, 纪元也是。而判定用的是 `iat < epoch`
+// ("相等不算失效")。于是:
+//
+//	13:00:14.2 登录 → token.iat = 13:00:14
+//	13:00:14.7 封禁 → epoch     = 13:00:14
+//	13:00:14 < 13:00:14 ？ 否 → ⛔ 该 token 幸存, 然后活满 900 秒
+//
+// 生产实测(2026-09-05): 同一秒内登录+封禁 → access token 返回 200;
+// 相隔 3 秒 → 401。窗口宽度 ≤1 秒, 但落进去的代价是【完整的 TTL】。
+//
+// ⭐ 所以"封禁 / 全部登出"必须把纪元推到【下一秒的起点】:
+// 那样当前这一秒里签发的所有 token 都严格早于纪元。
+//
+// # ⛔ 改密【不能】用这个方法
+//
+// 改密紧接着要为当前设备重签一张 token, 而它的 iat 就落在同一秒 ——
+// 用本方法会把刚签出来的那张【当场作废】, 用户改完密码立刻掉线。
+// 改密要的是"杀掉此刻之前的", 封禁要的是"连此刻一起杀掉",
+// ⚠️ 这两句话不一样, 所以是两个方法而不是一个参数。
+func (c *RevocationChecker) RevokeIssuedThrough(
+	ctx context.Context, userID string, at time.Time,
+) error {
+	return c.Revoke(ctx, userID, at.Truncate(time.Second).Add(time.Second))
+}
+
 // Revoke 把某个用户的吊销纪元推进到 at。
+//
+// ⚠️ 语义是"杀掉【严格早于】at 签发的 token"。与 at 同一秒签发的会幸存 ——
+// ⭐ 那是【改密重签】赖以存活的性质, 但对封禁是个 1 秒窗口。
+// ⛔ 封禁 / 全部登出请用 RevokeIssuedThrough。
 //
 // ⚠️ 失败返回 error 供调用方决定 —— ⛔ 本方法不吞。
 // 调用方(改密/封禁)应当记 WARN 但【不中断主流程】:
