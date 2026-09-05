@@ -202,9 +202,14 @@ func (g *SessionGuard) Refresh(ctx context.Context, oldToken string) (RefreshOut
 		return RefreshOutcome{}, newErr(CodeInvalidCredentials, "凭据无效")
 
 	default:
-		// ④ RotateUnknown —— 查无来历。⭐ 仍然发事件:
-		// 大量的"不存在的 token"本身就是一种值得看的模式(撞库 / 扫描)。
-		// ⚠️ 但没有可吊销的对象, 也无从判断是不是重放。
+		// ④ RotateUnknown —— 查无来历。⭐ 仍然发事件, 但没有可吊销的对象,
+		// 也无从判断是不是重放。
+		//
+		// ⚠️ 消费者把这个事件记在 DEBUG(生产默认关闭) —— 因为它与"已登出"
+		// 共用一个 Kind, 而后者在正常使用中大量发生。
+		// ⛔ 所以【不要】指望靠它发现撞库/扫描: 那要看
+		// /api/auth/refresh 的 401 访问日志(那条是 INFO), 或者将来把
+		// Unknown 拆成独立 Kind 再单独定级。
 		g.emitSession(ctx, EventSessionRefreshRejected, "", now, 0, nil)
 		return RefreshOutcome{}, newErr(CodeInvalidCredentials, "凭据无效")
 	}
