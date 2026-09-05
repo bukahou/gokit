@@ -68,13 +68,27 @@ const (
 
 	// ⭐ 会话相关 (批次二)。
 
-	// EventSessionReplayDetected 一个已失效的 refresh token 被再次使用。
+	// EventSessionReplayDetected ⭐ 一个【已被换走】的 refresh token 又被拿来换。
 	//
 	// ⚠️ 这是【最值得看的一条】: 它要么是攻击者在用偷到的 token,
 	// 要么是客户端并发/重试。⭐ 两者都会导致该用户全部会话被吊销,
 	// 所以它同时是"用户为什么突然全部登出"的唯一解释来源。
 	// ⛔ 缺了它, 用户会遇到一次无法解释的全体登出。
+	//
+	// ⚠️ 语义在 2026-09-05 收窄过: 它曾经覆盖"任何一次刷新失败", 于是
+	// 正常登出后的一次后台刷新也会记成重放【并触发全体吊销】。
+	// ⛔ 不要再把它放宽 —— 一个在正常使用中就会大量出现的"安全事件",
+	// 等于没有这个事件: 真的重放会被淹没在噪声里。
 	EventSessionReplayDetected EventKind = "session.replay_detected"
+
+	// EventSessionRefreshRejected 刷新被拒, 但【不是】重放。
+	//
+	// 覆盖: 会话已登出 / 已被别的设备登出 / 已过期 / token 查无来历。
+	// ⭐ 这些在正常使用中本来就会发生, 所以它是【运行事件而非安全事件】——
+	// 级别刻意低于 replay_detected, 否则告警会被它淹掉。
+	//
+	// ⚠️ 但它仍然值得记: 短时间内大量"查无来历"是撞库/扫描的形状。
+	EventSessionRefreshRejected EventKind = "session.refresh_rejected"
 	// EventSessionAccountInactive 刷新时发现账号已被封禁/停用。
 	EventSessionAccountInactive EventKind = "session.account_inactive"
 	// EventSessionPasswordChanged 会话建立于改密之前, 已失效。

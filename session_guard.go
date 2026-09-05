@@ -143,16 +143,19 @@ func (g *SessionGuard) Refresh(ctx context.Context, oldToken string) (RefreshOut
 
 	// ① 轮换。⭐ 这一步同时完成了「校验」与「作废旧的」——
 	// 它们是同一条语句，所以中间没有任何可以插进来的时刻。
-	rec, ok, err := g.store.Rotate(ctx, oldHash, HashRefreshToken(newToken), now.Add(g.refreshTTL))
+	rec, outcome, err := g.store.Rotate(ctx, oldHash, HashRefreshToken(newToken), now.Add(g.refreshTTL))
 	if err != nil {
 		// ⛔ 存储故障【不得】当作重放 —— 那会让一次数据库抖动
 		// 变成一大批用户的全部会话被吊销。
 		return RefreshOutcome{}, wrapErr(CodeLookupUnavailable, "轮换会话失败", err)
 	}
 
-	if !ok {
-		// ② 没有匹配的有效行。三种成因（用过 / 已吊销 / 不存在）无法区分，
-		// ⭐ 而正确处置对三种都一样：当作重放。
+	switch outcome {
+	case RotateRotated:
+		// 继续往下走。
+
+	case RotateReplayed:
+		// ② ⭐ 真重放: 这个 token 已经被换走过, 现在又有人拿它来换。
 		//
 		// # 为什么是「吊销该用户全部会话」而不是只拒绝这一次
 		//
@@ -171,14 +174,38 @@ func (g *SessionGuard) Refresh(ctx context.Context, oldToken string) (RefreshOut
 		//
 		// ⚠️ 代价必须写明：用户会被全部登出且【不知道为什么】。
 		// 所以审计事件是必须的，而且将来要能带外通知。
+		//
+		// ⚠️⚠️ 但这段论证【只对真重放成立】。2026-09-05 之前它被套用在
+		// "没有匹配的有效行"这个更大的集合上, 于是一条【已被正常登出】的
+		// 会话来刷新也走这里 —— 那里没有任何攻击者需要踢出去,
+		// 吊销全部只是把用户自己踢了。见下面的 RotateRevoked 分支。
 		if rec.UserID != "" {
 			n, revErr := g.store.RevokeAllByUser(ctx, rec.UserID)
 			g.emitSession(ctx, EventSessionReplayDetected, rec.UserID, now, n, revErr)
 		} else {
-			// 连是谁都查不到（token 从来不存在）。⭐ 仍然发事件 ——
-			// 大量的"不存在的 token"本身就是一种值得看的模式。
 			g.emitSession(ctx, EventSessionReplayDetected, "", now, 0, nil)
 		}
+		return RefreshOutcome{}, newErr(CodeInvalidCredentials, "凭据无效")
+
+	case RotateRevoked:
+		// ③ 会话已失效(自己登出 / 被别的设备登出 / 过期)。
+		//
+		// ⭐ 这是【正常事件】, 处置只有"拒绝这一次"。
+		//
+		// ⛔ 绝不能吊销全部会话。这条会话已经是死的了, 没有第二方需要踢出去;
+		// 而"登出其它设备"之后, 被登出那台设备做一次例行后台刷新就会走到这里 ——
+		// 若在此吊销全部, 点按钮的人几秒后也会掉线, 正是那个按钮要防的事。
+		//
+		// ⚠️ 审计级别刻意低于重放: 这类事件在正常使用中【本来就会发生】,
+		// 把它记成安全事件只会淹掉真正的重放。
+		g.emitSession(ctx, EventSessionRefreshRejected, rec.UserID, now, 0, nil)
+		return RefreshOutcome{}, newErr(CodeInvalidCredentials, "凭据无效")
+
+	default:
+		// ④ RotateUnknown —— 查无来历。⭐ 仍然发事件:
+		// 大量的"不存在的 token"本身就是一种值得看的模式(撞库 / 扫描)。
+		// ⚠️ 但没有可吊销的对象, 也无从判断是不是重放。
+		g.emitSession(ctx, EventSessionRefreshRejected, "", now, 0, nil)
 		return RefreshOutcome{}, newErr(CodeInvalidCredentials, "凭据无效")
 	}
 

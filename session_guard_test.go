@@ -204,9 +204,9 @@ type failingRotateStore struct {
 	fail bool
 }
 
-func (s *failingRotateStore) Rotate(ctx context.Context, o, n []byte, e time.Time) (SessionRecord, bool, error) {
+func (s *failingRotateStore) Rotate(ctx context.Context, o, n []byte, e time.Time) (SessionRecord, RotateOutcome, error) {
 	if s.fail {
-		return SessionRecord{}, false, errors.New("boom")
+		return SessionRecord{}, RotateUnknown, errors.New("boom")
 	}
 	return s.SessionStore.Rotate(ctx, o, n, e)
 }
@@ -357,5 +357,196 @@ func TestRevokeOne_必须防IDOR(t *testing.T) {
 	if len(left) != 1 {
 		t.Fatal("⛔ 越权吊销成功了 —— RevokeByID 必须同时匹配 userID, " +
 			"只按 sessionID 删是一个 IDOR")
+	}
+}
+
+// ============ ⭐ 重放 vs 正常失效 (2026-09-05 生产缺陷) ============
+//
+// 这一组测试守的是一条【处置相反】的分叉:
+//
+//	命中 prev 哈希(被换走过) → 重放 → 吊销该用户全部会话
+//	命中当前哈希(会话已死)   → 正常 → 只拒绝这一次
+//
+// ⚠️ 在 2026-09-05 之前 Rotate 只返回一个 bool, 两者合流成"当作重放",
+// 于是"登出其它设备"变成了"几秒后全员掉线"。生产实测:
+//
+//	A 登出其它设备 → A 刷新 200 → B(已被登出) 刷新 401
+//	→ ⛔ A 再刷新 401, DB 有效会话归 0
+//
+// ⛔ 这几个测试红了不要改测试, 那说明分叉又被合流了。
+
+// TestRefresh_登出后再刷新_不得吊销其它会话 是上面那个生产缺陷的最小复现。
+func TestRefresh_登出后再刷新_不得吊销其它会话(t *testing.T) {
+	g, store := newSessionGuard(t, activeStatus)
+	ctx := context.Background()
+
+	// 同一用户两条会话: A(自己) 与 B(另一台设备)。
+	tokA, _, err := g.Issue(ctx, SessionRecord{UserID: "u1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tokB, _, err := g.Issue(ctx, SessionRecord{UserID: "u1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// B 登出。⭐ 注意 B 的 token 【没有被轮换过】—— 它只是失效了。
+	if err := g.Logout(ctx, tokB); err != nil {
+		t.Fatal(err)
+	}
+
+	// B 那台设备做一次例行后台刷新 —— 这是【正常使用中必然发生】的事。
+	if _, err := g.Refresh(ctx, tokB); CodeOf(err) != CodeInvalidCredentials {
+		t.Fatalf("已登出的 token 刷新应被拒, got %v", err)
+	}
+
+	// ⭐⭐ 核心断言: A 必须【毫发无伤】。
+	if _, err := g.Refresh(ctx, tokA); err != nil {
+		t.Fatalf("⛔ A 的会话被连坐吊销了 —— "+
+			"一次正常的登出后刷新不得触发 RevokeAllByUser: %v", err)
+	}
+
+	sessions, err := store.ListByUser(ctx, "u1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sessions) != 1 {
+		t.Errorf("u1 应剩 1 条有效会话(A), got %d", len(sessions))
+	}
+}
+
+// TestRefresh_登出其它设备后_当前会话存活 复现的是用户可见的那个症状:
+// 点了"登出其它设备", 结果自己也掉线。
+func TestRefresh_登出其它设备后_当前会话存活(t *testing.T) {
+	g, store := newSessionGuard(t, activeStatus)
+	ctx := context.Background()
+
+	tokA, recA, err := g.Issue(ctx, SessionRecord{UserID: "u1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tokB, _, err := g.Issue(ctx, SessionRecord{UserID: "u1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tokC, _, err := g.Issue(ctx, SessionRecord{UserID: "u1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	n, err := g.RevokeOthers(ctx, "u1", recA.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 2 {
+		t.Fatalf("应登出 2 条(B/C), got %d", n)
+	}
+
+	// ⚠️ B 与 C 各做一次后台刷新 —— 现实里这几乎一定会发生。
+	for name, tok := range map[string]string{"B": tokB, "C": tokC} {
+		if _, err := g.Refresh(ctx, tok); CodeOf(err) != CodeInvalidCredentials {
+			t.Fatalf("%s 已被登出, 刷新应被拒, got %v", name, err)
+		}
+	}
+
+	// ⭐⭐ A 仍然必须能刷新。这正是 RevokeOthers 存在的意义。
+	if _, err := g.Refresh(ctx, tokA); err != nil {
+		t.Fatalf("⛔ 点了'登出其它设备'的人自己掉线了 —— "+
+			"被登出设备的例行刷新把当前会话也吊销了: %v", err)
+	}
+	sessions, _ := store.ListByUser(ctx, "u1")
+	if len(sessions) != 1 {
+		t.Errorf("应只剩当前会话, got %d", len(sessions))
+	}
+}
+
+// TestRefresh_真重放仍然吊销全部 守的是【另一侧】——
+// ⛔ 修上面那个缺陷不得把重放检测一起关掉。
+func TestRefresh_真重放仍然吊销全部(t *testing.T) {
+	g, store := newSessionGuard(t, activeStatus)
+	ctx := context.Background()
+
+	// u1 有两条会话: 被盗的 stolen, 以及另一台设备 other。
+	stolen, _, err := g.Issue(ctx, SessionRecord{UserID: "u1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := g.Issue(ctx, SessionRecord{UserID: "u1"}); err != nil {
+		t.Fatal(err)
+	}
+
+	// 攻击者先用 stolen 换到新的 —— 现在 stolen 落在 prev 上。
+	if _, err := g.Refresh(ctx, stolen); err != nil {
+		t.Fatal(err)
+	}
+
+	// ⭐ 合法客户端随后拿着 stolen 来 —— 这就是重放的真实形态。
+	if _, err := g.Refresh(ctx, stolen); CodeOf(err) != CodeInvalidCredentials {
+		t.Fatalf("重放应被拒, got %v", err)
+	}
+
+	// ⭐⭐ 该用户【全部】会话被吊销, 攻击者手里那条新 token 一并作废。
+	sessions, err := store.ListByUser(ctx, "u1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sessions) != 0 {
+		t.Errorf("⛔ 重放检测未吊销全部会话, 攻击者那条链还活着: 剩 %d 条", len(sessions))
+	}
+}
+
+// TestRefresh_事件分级 断言两种失败发的【不是同一个事件】——
+// 否则告警会被正常登出的噪声淹掉。
+func TestRefresh_事件分级(t *testing.T) {
+	var mu sync.Mutex
+	var kinds []EventKind
+	hook := func(_ context.Context, e AuditEvent) {
+		mu.Lock()
+		kinds = append(kinds, e.Kind)
+		mu.Unlock()
+	}
+	g, _ := newSessionGuard(t, activeStatus, WithSessionAudit(hook))
+	ctx := context.Background()
+
+	tok, _, err := g.Issue(ctx, SessionRecord{UserID: "u1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := g.Logout(ctx, tok); err != nil {
+		t.Fatal(err)
+	}
+	mu.Lock()
+	kinds = nil
+	mu.Unlock()
+
+	_, _ = g.Refresh(ctx, tok) // 已登出 → 应记 refresh_rejected
+	_, _ = g.Refresh(ctx, "完全不存在的-token")
+
+	mu.Lock()
+	defer mu.Unlock()
+	for _, k := range kinds {
+		if k == EventSessionReplayDetected {
+			t.Errorf("⛔ 正常登出/查无来历被记成了 %s —— "+
+				"这类事件在正常使用中大量发生, 记成安全事件会淹掉真的重放", k)
+		}
+		if k != EventSessionRefreshRejected {
+			t.Errorf("预期 %s, got %s", EventSessionRefreshRejected, k)
+		}
+	}
+	if len(kinds) != 2 {
+		t.Errorf("两次被拒的刷新应各发一个事件, got %d", len(kinds))
+	}
+}
+
+// TestRotateOutcome_零值是最保守的那一侧 守的是"默认值不得通向破坏力"。
+func TestRotateOutcome_零值是最保守的那一侧(t *testing.T) {
+	var zero RotateOutcome
+	if zero != RotateUnknown {
+		t.Fatalf("⛔ RotateOutcome 的零值必须是 RotateUnknown, got %v", zero)
+	}
+	// ⚠️ 若零值是 RotateReplayed, 任何忘了赋值的实现都会把
+	// "每一次刷新失败" 变成 "吊销该用户全部会话"。
+	if zero == RotateReplayed || zero == RotateRotated {
+		t.Error("⛔ 零值不得是 Replayed(有破坏力) 或 Rotated(等于放行)")
 	}
 }
