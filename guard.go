@@ -87,13 +87,44 @@ const (
 	// ⭐ 这些在正常使用中本来就会发生, 所以它是【运行事件而非安全事件】——
 	// 级别刻意低于 replay_detected, 否则告警会被它淹掉。
 	//
-	// ⚠️ 但它仍然值得记: 短时间内大量"查无来历"是撞库/扫描的形状。
+	// ⚠️ 消费者据此把它记在 DEBUG —— 生产默认看不到。
+	// ⛔ 因此不要指望靠它发现撞库/扫描: 那要看 /api/auth/refresh 的
+	// 401 访问日志, 或将来把"查无来历"拆成独立 Kind 再单独定级。
 	EventSessionRefreshRejected EventKind = "session.refresh_rejected"
 	// EventSessionAccountInactive 刷新时发现账号已被封禁/停用。
 	EventSessionAccountInactive EventKind = "session.account_inactive"
 	// EventSessionPasswordChanged 会话建立于改密之前, 已失效。
 	EventSessionPasswordChanged EventKind = "session.password_changed"
 )
+
+// AllEventKinds 列出全部事件类型。
+//
+// ⭐ 它的用途是让消费者【能够穷举】: 把审计事件映射成日志/告警的那段
+// switch 是本清单的一份副本, 而副本一定会漏。
+//
+// ⚠️ 2026-09-05 漏过一次: 批次二加了四个 session 事件, 消费者侧
+// (internal/user auditToSlog) 一个 case 都没加也没有 default,
+// 于是它们在生产中【一条都不记】—— 包括 replay_detected,
+// 也就是"用户为什么突然全部登出"的唯一解释来源。
+//
+// ⛔ 新增 EventKind 时必须同时加进这里。忘了加不会立刻出错,
+// 但消费者侧的穷举测试就覆盖不到它 —— 所以消费者【还必须有 default】,
+// 两道网各自独立, 单靠任何一道都不够。
+func AllEventKinds() []EventKind {
+	return []EventKind{
+		EventAllowed,
+		EventDenied,
+		EventIPBlocked,
+		EventLocked,
+		EventIPSourceUnavailable,
+		EventIPStoreUnavailable,
+		EventAccountStoreUnavailable,
+		EventSessionReplayDetected,
+		EventSessionRefreshRejected,
+		EventSessionAccountInactive,
+		EventSessionPasswordChanged,
+	}
+}
 
 // Degraded 报告这个事件是否表示【防护已降级】。
 //
