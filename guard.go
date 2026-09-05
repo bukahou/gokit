@@ -65,6 +65,20 @@ const (
 	EventIPStoreUnavailable EventKind = "login.ip_store_unavailable"
 	// EventAccountStoreUnavailable 账号维度的计数存储不可用, 本次未生效。
 	EventAccountStoreUnavailable EventKind = "login.account_store_unavailable"
+
+	// ⭐ 会话相关 (批次二)。
+
+	// EventSessionReplayDetected 一个已失效的 refresh token 被再次使用。
+	//
+	// ⚠️ 这是【最值得看的一条】: 它要么是攻击者在用偷到的 token,
+	// 要么是客户端并发/重试。⭐ 两者都会导致该用户全部会话被吊销,
+	// 所以它同时是"用户为什么突然全部登出"的唯一解释来源。
+	// ⛔ 缺了它, 用户会遇到一次无法解释的全体登出。
+	EventSessionReplayDetected EventKind = "session.replay_detected"
+	// EventSessionAccountInactive 刷新时发现账号已被封禁/停用。
+	EventSessionAccountInactive EventKind = "session.account_inactive"
+	// EventSessionPasswordChanged 会话建立于改密之前, 已失效。
+	EventSessionPasswordChanged EventKind = "session.password_changed"
 )
 
 // Degraded 报告这个事件是否表示【防护已降级】。
@@ -73,6 +87,9 @@ const (
 // 那种清单在加新 Kind 时必然漏掉一处, 而漏掉的表现是告警不响。
 func (k EventKind) Degraded() bool {
 	switch k {
+	// ⚠️ 会话事件【都不是降级】—— replay_detected 是防护正在生效,
+	// account_inactive / password_changed 是吊销按预期工作。
+	// ⛔ 混进降级会让"防护正常"触发降级告警。
 	case EventIPSourceUnavailable, EventIPStoreUnavailable, EventAccountStoreUnavailable:
 		return true
 	default:
@@ -86,6 +103,9 @@ type AuditEvent struct {
 	Username string
 	ClientIP string
 	At       time.Time
+	// Detail 是可选的补充说明 (如"已吊销 N 条会话")。
+	// ⛔ 不得放任何凭证或其哈希。
+	Detail string
 }
 
 // AuditHook 让消费者接住审计事件。

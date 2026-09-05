@@ -569,6 +569,9 @@ func TestEventKind_值不可改名(t *testing.T) {
 		EventDenied:                  "login.denied",
 		EventLocked:                  "login.locked",
 		EventIPBlocked:               "login.ip_blocked",
+		EventSessionReplayDetected:   "session.replay_detected",
+		EventSessionAccountInactive:  "session.account_inactive",
+		EventSessionPasswordChanged:  "session.password_changed",
 		EventIPSourceUnavailable:     "login.ip_source_unavailable",
 		EventIPStoreUnavailable:      "login.ip_store_unavailable",
 		EventAccountStoreUnavailable: "login.account_store_unavailable",
@@ -591,7 +594,11 @@ func TestEventKind_Degraded(t *testing.T) {
 		EventLocked:  false,
 		// ⛔ IP 退避拦截【不是】降级 —— 那是防护正在生效。
 		// 混进降级会让"防护正常工作"触发降级告警。
-		EventIPBlocked:               false,
+		EventIPBlocked: false,
+		// ⚠️ 会话事件都不是降级 —— 它们是防护【正在生效】的证据。
+		EventSessionReplayDetected:   false,
+		EventSessionAccountInactive:  false,
+		EventSessionPasswordChanged:  false,
 		EventIPSourceUnavailable:     true,
 		EventIPStoreUnavailable:      true,
 		EventAccountStoreUnavailable: true,
@@ -607,6 +614,7 @@ func TestEventKind_Degraded(t *testing.T) {
 	emitted := []EventKind{
 		EventAllowed, EventDenied, EventLocked, EventIPBlocked,
 		EventIPSourceUnavailable, EventIPStoreUnavailable, EventAccountStoreUnavailable,
+		EventSessionReplayDetected, EventSessionAccountInactive, EventSessionPasswordChanged,
 	}
 	if len(emitted) != len(degraded) {
 		t.Errorf("Kind 清单 %d 项与 Degraded 表 %d 项对不上 —— 有新 Kind 没登记",
