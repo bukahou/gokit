@@ -95,6 +95,49 @@ const (
 	EventSessionAccountInactive EventKind = "session.account_inactive"
 	// EventSessionPasswordChanged 会话建立于改密之前, 已失效。
 	EventSessionPasswordChanged EventKind = "session.password_changed"
+
+	// ⭐ 口令策略相关 (批次三 §14)。
+
+	// EventPasswordBreached 新口令出现在已知泄露集合中。
+	//
+	// ⚠️ INFO 级 —— 用户选了个烂口令是【正常业务流程】, 不是安全事件。
+	// geass 采用警告放行(用户裁决), 所以它甚至不中断流程。
+	// ⛔ 记成 WARN/ERROR 会让它在正常使用中持续刷屏, 淹掉真正要看的东西。
+	EventPasswordBreached EventKind = "password.breached"
+
+	// EventBreachCheckUnavailable ⭐ 泄露库查不了, 已按 §14.2.1 fail-open 放行。
+	//
+	// ⚠️⚠️ 这条是【fail-open 的代价凭证】, 也是本仓唯一一次允许
+	// "零值通向放行"(BreachUnknown 占零值位)的补偿控制。
+	//
+	// ⛔ 没有它, 泄露库可以挂三个月而没有任何人知道 —— 因为 fail-open
+	// 的表现与"一切正常"完全一样: 用户照常改密, 没有报错, 没有拒绝。
+	// 这正是最难发现的那类失效。
+	//
+	// WARN 级, 聚合超阈值即告警。
+	EventBreachCheckUnavailable EventKind = "password.breach_check_unavailable"
+
+	// EventPasswordChanged 用户改了口令 (⑤)。INFO —— 审计回溯用。
+	EventPasswordChanged EventKind = "password.changed"
+
+	// EventPasswordInitialized SSO 账号首次设置了口令 (⑥)。
+	//
+	// ⚠️ 与 changed 分开记 —— 它是【认证面的实质变化】:
+	// 一个原本只能 SSO 登录的账号从此多了一条口令入口。
+	// ⛔ 混进 changed 就查不出"谁给自己开了第二条入口"。
+	EventPasswordInitialized EventKind = "password.initialized"
+
+	// EventPasswordRevokeFailed 口令已改, 但吊销旧会话失败。
+	//
+	// ⚠️⚠️ ERROR 级 —— 这是少数真正需要人介入的情形:
+	// 口令变了而旧会话还活着。§7.7 应当在下一次 refresh 时兜住,
+	// 但"应当"不等于"确认", 而攻击者的会话可能就在其中。
+	EventPasswordRevokeFailed EventKind = "password.revoke_failed"
+
+	// EventPasswordReissueFailed 改密成功但没能为当前设备重签。
+	//
+	// ⚠️ WARN 而非 ERROR: 用户重新登录即可, 没有安全后果。
+	EventPasswordReissueFailed EventKind = "password.reissue_failed"
 )
 
 // AllEventKinds 列出全部事件类型。
@@ -123,6 +166,12 @@ func AllEventKinds() []EventKind {
 		EventSessionRefreshRejected,
 		EventSessionAccountInactive,
 		EventSessionPasswordChanged,
+		EventPasswordBreached,
+		EventBreachCheckUnavailable,
+		EventPasswordChanged,
+		EventPasswordInitialized,
+		EventPasswordRevokeFailed,
+		EventPasswordReissueFailed,
 	}
 }
 
@@ -252,7 +301,7 @@ func New(
 		acctStore: acctStore,
 		policy:    DefaultPolicy(),
 		cost:      bcrypt.DefaultCost,
-		minLen:    6,
+		minLen:    DefaultMinPasswordLen,
 		now:       time.Now,
 	}
 	for _, o := range opts {

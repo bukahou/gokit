@@ -35,17 +35,32 @@ func costOf(hash string) (int, bool) {
 	return c, true
 }
 
+// DefaultMinPasswordLen 是口令长度下限的默认值。
+//
+// ⚠️ Guard 与 PasswordGuard 【共用】这一个常量 —— 两处各写一个 6,
+// 就会出现"注册要 6 位、改密要 8 位"这种没人察觉的不一致。
+const DefaultMinPasswordLen = 6
+
 // HashPassword 按当前 cost 哈希口令。
 func (g *Guard) HashPassword(plain string) (string, error) {
-	if len(plain) < g.minLen {
+	return hashWithCost(plain, g.cost, g.minLen)
+}
+
+// hashWithCost 是包级实现, 供 Guard 与 PasswordGuard 共用。
+//
+// ⚠️ 抽出来是因为改密路径也要哈希 —— ⛔ 在那边再写一份
+// "查长度 → 查上限 → GenerateFromPassword", 就是同一条规则的两份摹本,
+// 而摹本只会漂移(改对了一处不会有任何症状提示另一处没改)。
+func hashWithCost(plain string, cost, minLen int) (string, error) {
+	if len(plain) < minLen {
 		return "", newErr(CodePasswordTooShort,
-			"口令至少 "+strconv.Itoa(g.minLen)+" 字节")
+			"口令至少 "+strconv.Itoa(minLen)+" 字节")
 	}
 	if len(plain) > MaxPasswordBytes {
 		return "", newErr(CodePasswordTooLong,
 			"口令不得超过 "+strconv.Itoa(MaxPasswordBytes)+" 字节")
 	}
-	h, err := bcrypt.GenerateFromPassword([]byte(plain), g.cost)
+	h, err := bcrypt.GenerateFromPassword([]byte(plain), cost)
 	if err != nil {
 		return "", wrapErr(CodeMisconfigured, "哈希口令失败", err)
 	}
