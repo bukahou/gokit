@@ -194,6 +194,15 @@ func TestRevocation_未配置时永远放行且不panic(t *testing.T) {
 //
 //	改密: 杀掉此刻【之前】的      (要保住马上要签的那张)
 //	封禁: 连此刻【一起】杀掉      (没有要保住的东西)
+//
+// # ⛔⛔ 这两个方法【不能合并】—— 本测试就是那道闸
+//
+// 它们的实现只差一个 `.Add(time.Second)`, 所以下一个人看到"两个几乎
+// 一样的吊销方法"很可能顺手合并成一个。⚠️ 合并即复活这个 1 秒窗口:
+//   - 都用 Revoke      → 封禁漏掉同一秒签发的 token
+//   - 都用 Through     → 改密后重签出的 token 当场作废(立刻掉线)
+//
+// ⭐ 下面两个子测试各守一侧, 合并之后【必然有一个变红】。
 func TestRevocation_同一秒签发的token必须被封禁杀掉(t *testing.T) {
 	store := newMemRevocationStore()
 	c := NewRevocationChecker(store)
