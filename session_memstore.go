@@ -51,7 +51,7 @@ func (s *sessionMemStore) Create(_ context.Context, rec SessionRecord, hash []by
 // 所以并发调用中只有一方能匹配到旧哈希。
 func (s *sessionMemStore) Rotate(
 	_ context.Context, oldHash, newHash []byte, newExpiry time.Time,
-) (SessionRecord, bool, error) {
+) (SessionRecord, RotateOutcome, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for _, r := range s.rows {
@@ -60,24 +60,37 @@ func (s *sessionMemStore) Rotate(
 			r.hash = append([]byte(nil), newHash...)
 			r.rec.ExpiresAt = newExpiry
 			r.rec.LastActiveAt = time.Now()
-			return r.rec, true, nil
+			return r.rec, RotateRotated, nil
 		}
 	}
-	// ⚠️ 匹配不到有效行时，尝试按 prevHash 找出【这个哈希曾经属于谁】。
+
+	// ⭐⭐ 没轮换到时, 必须分清是【重放】还是【已正常失效】——
+	// 两者的处置相反, 见 RotateOutcome 的注释。
 	//
-	// ⭐ 这一步是重放检测能"反击"的全部依据。覆盖的正是最要紧的那个场景:
+	// ⚠️ 先查 prevHash: 命中它说明这个 token 已经【被换走过】,
+	// 也就是存在第二方 —— 那才是重放。
+	//
+	// ⭐ 它覆盖的正是真实的失窃形态:
 	//   攻击者偷到 R1 先用 → R1→R2 (攻击者持 R2)
 	//   合法客户端仍持 R1, 用它 → R1 现在是 prevHash → 命中 → 吊销全部
 	//   → ⭐ 攻击者的 R2 一并作废
-	//
-	// ⚠️ 更早的 token (轮换两次以上) 找不回归属 —— 只能拒绝不能反击。
-	// 那是可接受的: 上面那个顺序才是真实的失窃形态。
 	for _, r := range s.rows {
-		if bytes.Equal(r.prevHash, oldHash) || bytes.Equal(r.hash, oldHash) {
-			return SessionRecord{UserID: r.rec.UserID}, false, nil
+		if len(r.prevHash) > 0 && bytes.Equal(r.prevHash, oldHash) {
+			return SessionRecord{UserID: r.rec.UserID}, RotateReplayed, nil
 		}
 	}
-	return SessionRecord{}, false, nil
+
+	// 命中【当前】哈希 = 这个 token 从没被换走过, 只是会话死了
+	// (自己登出 / 被别的设备登出 / 过期)。⛔ 这【不是】重放。
+	for _, r := range s.rows {
+		if bytes.Equal(r.hash, oldHash) {
+			return SessionRecord{UserID: r.rec.UserID}, RotateRevoked, nil
+		}
+	}
+
+	// ⚠️ 轮换两次以上的旧 token 会落到这里(prev 已被覆盖) —— 只能拒绝,
+	// 不能反击。那是可接受的: 上面那个顺序才是真实的失窃形态。
+	return SessionRecord{}, RotateUnknown, nil
 }
 
 func (s *sessionMemStore) FindByHash(_ context.Context, hash []byte) (SessionRecord, bool, error) {
