@@ -1,6 +1,8 @@
-package localauth
+package redisstore
 
 import (
+	"github.com/bukahou/gokit/localauth"
+
 	"context"
 	"os"
 	"os/exec"
@@ -20,11 +22,11 @@ import (
 // ⛔ 生产不做这个实验 —— 那台 Redis 同时服务 media 缓存与会话存储,
 // 为验一条防御回退去制造一次全站抖动不划算, 而且验的东西完全一样。
 //
-//	GEASS_TEST_KILLABLE_REDIS_PORT=6399 go test ./pkg/localauth/ -run 运行期Redis挂掉
+//	LOCALAUTH_TEST_KILLABLE_REDIS_PORT=6399 go test ./redisstore/ -run 运行期Redis挂掉
 func Test运行期Redis挂掉_必须fail_open(t *testing.T) {
-	port := os.Getenv("GEASS_TEST_KILLABLE_REDIS_PORT")
+	port := os.Getenv("LOCALAUTH_TEST_KILLABLE_REDIS_PORT")
 	if port == "" {
-		t.Skip("未设置 GEASS_TEST_KILLABLE_REDIS_PORT")
+		t.Skip("未设置 LOCALAUTH_TEST_KILLABLE_REDIS_PORT")
 	}
 	prefix := "failopen:" + strconv.FormatInt(time.Now().UnixNano(), 36) + ":"
 	store, err := NewRedisRevocationStore("redis://localhost:"+port+"/0", prefix, time.Hour)
@@ -32,9 +34,9 @@ func Test运行期Redis挂掉_必须fail_open(t *testing.T) {
 		t.Fatalf("连不上可杀的 Redis: %v", err)
 	}
 
-	var events []EventKind
-	c := NewRevocationChecker(store, WithRevocationAudit(
-		func(_ context.Context, e AuditEvent) { events = append(events, e.Kind) }))
+	var events []localauth.EventKind
+	c := localauth.NewRevocationChecker(store, localauth.WithRevocationAudit(
+		func(_ context.Context, e localauth.AuditEvent) { events = append(events, e.Kind) }))
 	ctx := context.Background()
 	base := time.Now().Truncate(time.Second)
 
@@ -72,10 +74,10 @@ func Test运行期Redis挂掉_必须fail_open(t *testing.T) {
 	if len(events) == 0 {
 		t.Error("⛔ 降级没有留痕 —— fail-open 的表现与'一切正常'完全一样, " +
 			"没有事件就意味着 Redis 可以挂三个月而没人知道")
-	} else if events[len(events)-1] != EventRevocationCheckUnavailable {
+	} else if events[len(events)-1] != localauth.EventRevocationCheckUnavailable {
 		t.Errorf("⛔ 发的不是 %s 而是 %s —— "+
 			"若客户端把连接失败报成 redis.Nil, 会被当成'没有纪元'而静默放行",
-			EventRevocationCheckUnavailable, events[len(events)-1])
+			localauth.EventRevocationCheckUnavailable, events[len(events)-1])
 	} else {
 		t.Logf("⭐ 降级已留痕: %s ✅", events[len(events)-1])
 	}

@@ -8,7 +8,7 @@ import (
 // AccountStatus 是刷新时复查账号状态的结果。
 //
 // ⚠️ 模块【不解释】宿主的状态取值 —— 它只问一个问题：这个账号现在还能不能用。
-// ⛔ 不要把它做成 int 或字符串枚举，那会让模块开始理解 geass 的 status 语义，
+// ⛔ 不要把它做成 int 或字符串枚举，那会让模块开始理解宿主的 status 语义，
 // 而三家的取值一定不同（与「共享模块永远不解释 role 值」同源）。
 type AccountStatus struct {
 	// Active 账号当前是否可用。false = 封禁/停用/已删。

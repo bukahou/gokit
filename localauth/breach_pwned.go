@@ -91,7 +91,7 @@ func (p *pwnedRangeChecker) Check(ctx context.Context, plaintext string) (Breach
 	// 每个前缀的后缀条数不同, 是一个可观测的指纹。
 	// k-anonymity 保护的是【内容】, 这个头保护的是【体积】。
 	req.Header.Set("Add-Padding", "true")
-	req.Header.Set("User-Agent", "geass-v3")
+	req.Header.Set("User-Agent", "gokit-localauth/"+Version)
 
 	resp, err := p.client.Do(req)
 	if err != nil {

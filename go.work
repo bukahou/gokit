@@ -1,0 +1,6 @@
+// 本仓是多模块共享库仓: 每个子目录一个独立 Go module, 各自打 tag (<模块>/vX.Y.Z)。
+// go.work 只为本地开发方便 (在仓根直接 go build ./...), 提交进仓。
+// ⚠️ CI 用 GOWORK=off 逐模块跑, 保证每个模块脱离 workspace 也能独立构建。
+go 1.26.6
+
+use ./localauth

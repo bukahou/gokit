@@ -1,6 +1,8 @@
-package localauth
+package redisstore
 
 import (
+	"github.com/bukahou/gokit/localauth"
+
 	"context"
 	"os"
 	"strconv"
@@ -14,19 +16,19 @@ import (
 // "如果实现正确, 语义就正确"。而真正要验的是那段 Lua 在 Redis 里
 // 到底是不是这么执行的 —— 那是另一回事。
 //
-//	GEASS_TEST_REDIS_URL='redis://localhost:6379/9' go test ./pkg/localauth/ -run 纪元_真Redis
+//	LOCALAUTH_TEST_REDIS_URL='redis://localhost:6379/9' go test ./redisstore/ -run 纪元_真Redis
 func Test纪元_真Redis(t *testing.T) {
-	url := os.Getenv("GEASS_TEST_REDIS_URL")
+	url := os.Getenv("LOCALAUTH_TEST_REDIS_URL")
 	if url == "" {
-		t.Skip("未设置 GEASS_TEST_REDIS_URL")
+		t.Skip("未设置 LOCALAUTH_TEST_REDIS_URL")
 	}
-	prefix := "geasstest:revoke:" + strconv.FormatInt(time.Now().UnixNano(), 36) + ":"
+	prefix := "localauthtest:revoke:" + strconv.FormatInt(time.Now().UnixNano(), 36) + ":"
 	store, err := NewRedisRevocationStore(url, prefix, time.Hour)
 	if err != nil {
 		t.Fatal(err)
 	}
 	ctx := context.Background()
-	c := NewRevocationChecker(store)
+	c := localauth.NewRevocationChecker(store)
 
 	base := time.Now().Truncate(time.Second)
 

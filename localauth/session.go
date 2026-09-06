@@ -62,7 +62,7 @@ type SessionRecord struct {
 	// ID 会话标识。由存储层生成, 模块不解释它的格式。
 	ID string
 	// UserID ⚠️ 是 string 而不是任何具体类型 —— 模块【不假设宿主的 id 形态】。
-	// geass 用 UUID、melete 用 int、atlhyper 可能用别的。
+	// 有的宿主用 UUID、有的用整数自增、有的用别的。
 	UserID string
 
 	CreatedAt    time.Time

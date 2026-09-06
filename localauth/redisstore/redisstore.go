@@ -1,6 +1,8 @@
-package localauth
+package redisstore
 
 import (
+	"github.com/bukahou/gokit/localauth"
+
 	"context"
 	"errors"
 	"fmt"
@@ -10,7 +12,7 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
-// redisRevocationStore 是 RevocationStore 的 Redis 实现。
+// redisRevocationStore 是 localauth.RevocationStore 的 Redis 实现。
 //
 // # key 形状
 //
@@ -59,7 +61,7 @@ const (
 )
 
 // NewRedisRevocationStore 构造 Redis 实现 (单实例)。
-func NewRedisRevocationStore(redisURL, prefix string, ttl time.Duration) (RevocationStore, error) {
+func NewRedisRevocationStore(redisURL, prefix string, ttl time.Duration) (localauth.RevocationStore, error) {
 	opt, err := redis.ParseURL(redisURL)
 	if err != nil {
 		return nil, fmt.Errorf("解析 Redis URL 失败: %w", err)
@@ -74,7 +76,7 @@ func NewRedisRevocationStore(redisURL, prefix string, ttl time.Duration) (Revoca
 // NewRedisSentinelRevocationStore 构造 Redis 实现 (Sentinel 高可用)。
 func NewRedisSentinelRevocationStore(
 	masterName string, sentinelAddrs []string, db int, prefix string, ttl time.Duration,
-) (RevocationStore, error) {
+) (localauth.RevocationStore, error) {
 	if masterName == "" || len(sentinelAddrs) == 0 {
 		return nil, errors.New("Sentinel 模式需要 masterName 与 sentinelAddrs")
 	}
@@ -99,7 +101,7 @@ func NewRedisSentinelRevocationStore(
 // 启动期配错要响, 运行期故障才 fail-open —— 两个时刻, 两种责任人。
 func newPingedRevocationStore(
 	c *redis.Client, prefix string, ttl time.Duration,
-) (RevocationStore, error) {
+) (localauth.RevocationStore, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	if err := c.Ping(ctx).Err(); err != nil {

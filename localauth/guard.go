@@ -101,7 +101,7 @@ const (
 	// EventPasswordBreached 新口令出现在已知泄露集合中。
 	//
 	// ⚠️ INFO 级 —— 用户选了个烂口令是【正常业务流程】, 不是安全事件。
-	// geass 采用警告放行(用户裁决), 所以它甚至不中断流程。
+	// 默认宿主采用警告放行, 所以它甚至不中断流程。
 	// ⛔ 记成 WARN/ERROR 会让它在正常使用中持续刷屏, 淹掉真正要看的东西。
 	EventPasswordBreached EventKind = "password.breached"
 

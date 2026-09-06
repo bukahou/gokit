@@ -107,7 +107,7 @@ type ChangeRequest struct {
 
 // ChangeOutcome 是改密结果。
 type ChangeOutcome struct {
-	// Advice 新口令的泄露评估。⚠️ 必须一路带到前端 —— geass 采用
+	// Advice 新口令的泄露评估。⚠️ 必须一路带到前端 —— 宿主可采用
 	// 警告放行, 前端要据此提示用户。⛔ 不要在后端丢掉它。
 	Advice PasswordAdvice
 

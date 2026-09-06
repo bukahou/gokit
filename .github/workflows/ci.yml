@@ -1,0 +1,58 @@
+## ============================================================
+## ci —— 每个模块独立 build / vet / test
+##
+## 本仓是多模块仓 (每个子目录一个 go.mod)。CI 刻意 GOWORK=off:
+## 消费者 go get 到的是单个模块, 它必须脱离 workspace 也能构建。
+## 模块清单由 find 发现, 新增模块不需要改本文件。
+## ============================================================
+name: ci
+
+on:
+  push:
+    branches: [main]
+    tags: ["**/v*"]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  modules:
+    name: discover modules
+    runs-on: ubuntu-latest
+    outputs:
+      dirs: ${{ steps.find.outputs.dirs }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: find
+        run: |
+          dirs=$(find . -name go.mod -not -path './.git/*' -printf '%h\n' | sed 's|^\./||' | sort | jq -R . | jq -sc .)
+          echo "dirs=$dirs" >> "$GITHUB_OUTPUT"
+          echo "模块: $dirs"
+
+  test:
+    name: ${{ matrix.dir }}
+    needs: modules
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        dir: ${{ fromJSON(needs.modules.outputs.dirs) }}
+    defaults:
+      run:
+        working-directory: ${{ matrix.dir }}
+    env:
+      GOWORK: "off"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: ${{ matrix.dir }}/go.mod
+          cache-dependency-path: ${{ matrix.dir }}/go.sum
+      - run: go mod download
+      - run: go build ./...
+      - run: go vet ./...
+      - run: test -z "$(gofmt -l .)" || { gofmt -l .; echo '⛔ gofmt 不干净'; exit 1; }
+      - run: go test ./...
