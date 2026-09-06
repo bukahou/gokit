@@ -9,7 +9,7 @@
 - 吊销纪元：改密 / 封禁 / 强制登出对 access token **立即**生效（fail-open、可计数）
 
 ```
-go get github.com/bukahou/gokit/localauth@localauth/v0.1.0
+go get github.com/bukahou/gokit/localauth@localauth/v0.2.0
 ```
 
 包文档见 `doc.go`；每个决定的来龙去脉见 [`DECISIONS.md`](./DECISIONS.md)；最小接线见 [`example_test.go`](./example_test.go)。
@@ -82,4 +82,4 @@ LOCALAUTH_TEST_KILLABLE_REDIS_PORT=6399 go test ./redisstore/ -run 运行期Redi
 
 ## 版本
 
-`v0.1.0`：验收期，API 可改。两家宿主稳定后升 `v1.0.0`。变更记录见 `DECISIONS.md` 末尾。
+`v0.2.0`：验收期，API 仍可改。两家宿主稳定后升 `v1.0.0`。变更记录见 `DECISIONS.md` 末尾。
