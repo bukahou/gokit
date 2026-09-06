@@ -28,7 +28,7 @@ go get github.com/bukahou/gokit/localauth@localauth/v0.1.0
 | `SessionStore` | `SessionGuard` | ✅ | 参数只有哈希；`Rotate` 原子且区分 `Replayed` / `Revoked`；保留上一个哈希以便反击。用 `storetest.RunSessionStoreTests` 验 |
 | `AccountStatusFunc` | `SessionGuard` | ✅ | 刷新时复查账号是否仍允许登录 |
 | `CredentialStore` | `PasswordGuard` | ✅ | 空哈希 = 该账号没有口令（纯 OIDC），是合法状态 |
-| `AccessTokenIssuer` | `PasswordGuard`、`DeviceReissuer` | 可选 | 改密 / 改邮箱后为当前设备重签 access token；模块不知道密钥与 claims |
+| `AccessTokenIssuer` | `PasswordGuard`、`DeviceReissuer` | 可选 | 改密 / 改邮箱后为当前设备重签 access token；模块不知道密钥与 claims。⚠️ **必须用模块传入的 `issuedAt` 作为 token 的 `iat`**，不能用自己的 `now()` —— 那个值是精心算过的（下一秒起点），用别的会让吊销窗口关不上或把新 token 当场作废 |
 | `BreachChecker` | `PasswordPolicy` | ✅ | 内置 `NewPwnedRangeChecker`（HIBP）、`NewLocalBreachChecker`（本地词表）、`NewNoopBreachChecker`（不查，但 `Skipped ≠ Clean`） |
 | `VerificationStore` | `VerificationGuard` | ✅ | 一人一码、`BumpAttempts` 原子、`Consume` 一次性。用 `storetest.RunVerificationStoreTests` 验 |
 | `MessageSender` | `VerificationGuard` | ✅ | 投递验证码与两类通知；模板、语言、通道全在宿主 |

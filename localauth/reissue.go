@@ -35,14 +35,14 @@ func NewDeviceReissuer(sessions *SessionGuard, issuer AccessTokenIssuer) *Device
 //
 // ⚠️ 返回 error 只表示 refresh 都没签出来 —— 那时用户需要重新登录。
 // access 签发失败不算错误: 记在 AccessErr, 由调用方决定记什么级别。
-func (r *DeviceReissuer) Reissue(ctx context.Context, userID, device, ip string) (Reissued, error) {
+func (r *DeviceReissuer) Reissue(ctx context.Context, userID, device, ip string, issuedAt time.Time) (Reissued, error) {
 	tok, rec, err := r.sessions.Issue(ctx, SessionRecord{UserID: userID, DeviceInfo: device, ClientIP: ip})
 	if err != nil {
 		return Reissued{}, err
 	}
 	out := Reissued{RefreshToken: tok, Session: rec}
 	if r.issuer != nil {
-		at, exp, aerr := r.issuer(ctx, userID, rec.ID)
+		at, exp, aerr := r.issuer(ctx, userID, rec.ID, issuedAt)
 		if aerr != nil {
 			out.AccessErr = aerr
 		} else {

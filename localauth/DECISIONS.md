@@ -26,7 +26,7 @@
 | 11 | 账号维度的计数键列必须与用户名列**共享同一条排序规则**，且在 DDL 里显式钉死 | 本地 MySQL 与 TiDB 的默认排序规则不同，"本地试过没问题"在生产上正好是最严重的那种漏。⛔ 不要在 Go 侧自己写规范化去"对齐"（`store.go`） |
 | 12 | **`Rotate` 必须原子**，且必须区分 `Replayed`（命中上一个哈希）与 `Revoked`（命中当前哈希但会话已死） | 2026-09-05 之前只返回 bool 并"一律当重放"，后果是"登出其它设备"变成几秒后全员掉线（`session.go`）。`RotateUnknown` 刻意占零值位：实现忘了赋值时后果是拒绝本次，不是吊销全部 |
 | 13 | 会话存储的参数只有**哈希**，明文 refresh token 在类型上写不出来 | 宿主此前 122 份活凭证明文入库（§13.3） |
-| 14 | 吊销纪元判定用 `iat < epoch`，**相等不算失效** | 改密紧接着重签，新 token 与纪元落在同一秒；相等算失效 = 改完密码立刻掉线，100% 复现。封禁 / 全部登出因此用 `RevokeIssuedThrough`（推到下一秒起点）——两句话不一样，所以是两个方法（`revocation.go`，§26） |
+| 14 | 吊销纪元判定用 `iat < epoch`，**相等不算失效**；⭐ v0.2.0 起**所有**吊销都用 `RevokeIssuedThrough`（推到下一秒起点），需要保住的那张 token 靠**把它的 `iat` 也定到那一秒**存活 | 原先改密/改邮箱用 `Revoke(changedAt)` 来保住重签的 token，代价是与 `changedAt` 同秒签发的**其它设备** token 也满足 `iat == epoch` 而幸存，且幸存到 access TTL 结束（生产 900 秒）。生产实测扫 14 个登录相位命中 1 次。修法是两者一起改：纪元推到下一秒 + 重签 `iat` 也定到下一秒，于是「保住自己」和「杀死别人」同时成立（`reissue_window_test.go`，§38.7） |
 | 15 | 吊销检查 **fail-open + 可计数的降级事件**，超时 300/200/200 ms 且不重试 | 本地实测 Redis 挂掉时默认超时让每次判定耗 1.68 s，fail-slow 比 fail-open 危险得多（`redisstore`）；"没有纪元"不发事件，否则噪声淹没真故障 |
 | 16 | 泄露检查 `BreachUnknown` 占零值位（查不成 = 放行），但 `Skipped ≠ Clean`，且**警告放行**而非拒绝 | 用户裁决 2026-09-05：命中泄露也放行，把次数带到前端提示（`password_policy.go`） |
 | 17 | 验证码：`(subject, purpose)` 作 selector，"根本没有"不计 attempts、"找到但不对"才计；一人一码；`Consume` 一次性原子 | 攻击者猜码只能消耗那一行的几次机会，猜不存在的邮箱什么都消耗不到（`verification.go` §23） |
@@ -49,4 +49,5 @@
 - `v0.1.1`（2026-09-06）：`storetest.RunSessionStoreTests` 增加 `SessionOptions.UserID`（宿主注入 id 映射）——第一个真实消费者的 user_id 是 UUID，契约里的 "u1" 被拒绝。
 - `v0.1.2`（2026-09-06）：`storetest` 验证码契约改用 32 字节哈希（真库 BINARY(32) 列会补零，短串比较误报）；去掉"消费编造 id"的断言（id 形态由存储决定）。两条都是第一个真实存储跑出来的。
 - `v0.1.3`（2026-09-06）：`FailureStore.Bump` 注释明确"自增与回读同一原子区间"，storetest 并发断言改为返回值须是 1..n 的排列（UPSERT 后再 SELECT 会露馅）；`SessionStore.Rotate` 单列三条 DDL 级实现约束（prev_hash 列 / 单条原子 UPDATE / 失配填 UserID）。前者由 melete 指出，后者由 melete 的 DDL 漏列暴露。
+- `v0.2.0`（2026-09-06）：⚠️ **API 变更** —— `AccessTokenIssuer` 增加 `issuedAt time.Time` 参数，`DeviceReissuer.Reissue` 同。宿主必须用模块给的 `issuedAt` 作为 token 的 `iat`，否则「改密后同一秒的其它设备 token 幸存」这个窗口关不上。新增 `WithEmailChangeClock`。
 - v0 期间 API 可改；两家宿主（geass-v3、melete）稳定后升 v1.0.0。

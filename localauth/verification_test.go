@@ -591,8 +591,19 @@ func TestEmailChange_全流程与同秒重签存活(t *testing.T) {
 	if _, err := sessions.Refresh(ctx, out.Reissued.RefreshToken); err != nil {
 		t.Fatalf("⛔ 重签出的会话不可用: %v", err)
 	}
-	// ⭐ 纪元用的是 Revoke 而非 Through: 同一秒签出的 access 必须存活
-	if rev.IsRevoked(ctx, uid, time.Now().Truncate(time.Second)) {
-		t.Fatal("⛔ 改邮箱用了 RevokeIssuedThrough —— 同一秒重签出的 access token 当场作废, 改完邮箱立刻掉线")
+	// ⭐⭐ v0.2.0 起改用 RevokeIssuedThrough + 把重签 iat 也定到下一秒 (见 reissue_window_test.go)。
+	//
+	// ⚠️ 这条断言原先写的是「纪元用 Revoke 而非 Through, 同一秒签出的 access 必须存活」,
+	//    并用 time.Now().Truncate(1s) 代表"重签出的 token"—— 那其实是在钉旧实现的副产品:
+	//    它成立只是因为当时重签的 iat 恰好落在当前秒。真正该钉的是两件事:
+	//      ① 改密/改邮箱【之前】签发的 token 必须全部失效 (含与 changedAt 同秒的那些)
+	//      ② 重签出来的那张必须存活
+	//    ①② 由 reissue_window_test.go 用注入时钟精确覆盖; 这里只复核 ② 的方向, 用真实的
+	//    "下一秒"而不是"当前秒"—— 因为 v0.2.0 的重签 iat 就在那里。
+	if rev.IsRevoked(ctx, uid, nextSecond(time.Now())) {
+		t.Fatal("⛔ 重签出的 access token 被自己的纪元作废了 —— 改完邮箱立刻掉线")
+	}
+	if !rev.IsRevoked(ctx, uid, time.Now().Truncate(time.Second)) {
+		t.Fatal("⛔ 与改邮箱同一秒签发的旧 token 幸存 —— 那是 v0.2.0 修掉的窗口")
 	}
 }

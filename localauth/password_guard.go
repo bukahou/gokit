@@ -48,7 +48,7 @@ type CredentialStore interface {
 // 用户很可能拿旧口令重试, 然后困惑于它为什么不管用。
 //
 // ⚠️ 返回 error 时守卫【不中断】, 只是不带回新 token 并发一条 WARN。
-type AccessTokenIssuer func(ctx context.Context, userID, sessionID string) (token string, expiresAt time.Time, err error)
+type AccessTokenIssuer func(ctx context.Context, userID, sessionID string, issuedAt time.Time) (token string, expiresAt time.Time, err error)
 
 // ============ 改密守卫 ============
 
@@ -294,17 +294,23 @@ func (g *PasswordGuard) Change(ctx context.Context, req ChangeRequest) (ChangeOu
 	//
 	// changedAt 在 ⑥ 之前就取好了, 而 ⑧ 重签出的 access token 其 iat 必然 >= changedAt ——
 	// ⛔ 所以新 token 不会被自己作废, 且这与 ⑦.5 和 ⑧ 谁先谁后【无关】。
-	// ⚠️ 用 Revoke 而不是 RevokeIssuedThrough: 后者会把同一秒签出的新 token 当场作废。
+	// ⚠️⚠️ 2026-09-06 (v0.2.0) 修正: 旧写法 Revoke(changedAt) 把纪元设在 changedAt 那一秒,
+	// 而判定是 `iat < epoch`(相等不算失效) —— 于是与 changedAt【同一秒签发】的其它设备 token
+	// 满足 iat == epoch 而幸存, 且幸存到 access TTL 结束(生产 900 秒), 不是一秒。
+	// 生产实测扫 14 个登录相位命中 1 次。⛔ 但只把纪元换成 Through 会连刚重签的 token 一起作废,
+	// ✅ 所以重签的 iat 也定到同一个 epoch(见下方 reissueAt): iat == epoch 靠"相等不算失效"幸存,
+	//    其它设备 iat ≤ changedAt < epoch 全部失效。两个目标同时成立, 窗口关闭。
 	// 顺序上仍放在重签之前: 若进程在两步之间崩溃, "已吊销但没重签"好过"已重签但没吊销"。
+	reissueAt := nextSecond(changedAt)
 	if g.revoker != nil {
-		if err := g.revoker.Revoke(ctx, req.UserID, changedAt); err != nil {
+		if err := g.revoker.RevokeIssuedThrough(ctx, req.UserID, changedAt); err != nil {
 			g.emitPassword(ctx, EventRevocationWriteFailed, req.UserID, changedAt, err.Error())
 		}
 	}
 
 	// ⑧ 重签当前设备
 	if req.CurrentSessionID != "" {
-		re, issueErr := g.reissuer().Reissue(ctx, req.UserID, req.DeviceInfo, req.ClientIP)
+		re, issueErr := g.reissuer().Reissue(ctx, req.UserID, req.DeviceInfo, req.ClientIP, reissueAt)
 		if issueErr != nil {
 			// ⚠️ 不是致命错误: 口令改好了, 只是用户得重新登录。
 			g.emitPassword(ctx, EventPasswordReissueFailed, req.UserID, changedAt, issueErr.Error())

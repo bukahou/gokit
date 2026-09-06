@@ -132,6 +132,14 @@ func (c *RevocationChecker) emitRevocation(ctx context.Context, kind EventKind, 
 	c.audit(ctx, AuditEvent{Kind: kind, UserID: userID, At: c.now(), Detail: detail})
 }
 
+// nextSecond 返回 t 所在秒的【下一秒起点】。
+//
+// ⭐ 它与 RevokeIssuedThrough 用同一个算式, 这不是巧合而是【必须】: Through(t) 把纪元设为
+// nextSecond(t), 而"改密/改邮箱后为当前设备重签"的 token 必须恰好落在那一秒, 才能靠
+// "相等不算失效"幸存。两处若各写各的, 一旦有人改了其中一个(比如改成毫秒精度),
+// 重签的 token 会当场作废, 而且没有任何编译错误。
+func nextSecond(t time.Time) time.Time { return t.Truncate(time.Second).Add(time.Second) }
+
 // RevokeIssuedThrough 吊销【包括当前这一秒在内】签发的全部 token。
 //
 // # ⚠️⚠️ 为什么需要它 —— 一个用生产实测才发现的 1 秒窗口
@@ -158,7 +166,7 @@ func (c *RevocationChecker) emitRevocation(ctx context.Context, kind EventKind, 
 func (c *RevocationChecker) RevokeIssuedThrough(
 	ctx context.Context, userID string, at time.Time,
 ) error {
-	return c.Revoke(ctx, userID, at.Truncate(time.Second).Add(time.Second))
+	return c.Revoke(ctx, userID, nextSecond(at))
 }
 
 // Revoke 把某个用户的吊销纪元推进到 at。

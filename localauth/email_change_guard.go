@@ -52,6 +52,11 @@ func WithEmailChangeReissuer(r *DeviceReissuer) EmailChangeOption {
 	return func(g *EmailChangeGuard) { g.reissue = r }
 }
 
+// WithEmailChangeClock 换时钟 (测试用)。
+func WithEmailChangeClock(f func() time.Time) EmailChangeOption {
+	return func(g *EmailChangeGuard) { g.now = f }
+}
+
 // WithEmailChangeAudit 接住审计事件。
 func WithEmailChangeAudit(h AuditHook) EmailChangeOption {
 	return func(g *EmailChangeGuard) { g.audit = h }
@@ -137,10 +142,11 @@ type EmailChangeOutcome struct {
 //	   ⭐ 这是唯一让受害者知道"我的恢复地址被改了"的渠道, 所以失败必须可见
 //	⑤ 吊销全部 + 纪元 + 重签当前设备
 //
-// # ⚠️ 纪元用 Revoke(at) 而不是 RevokeIssuedThrough
+// # ⭐ 纪元推到下一秒起点, 重签 iat 也定在那一秒 (v0.2.0)
 //
-// 紧接着要重签, 而重签出的 token 其 iat 落在同一秒。Through 会把它当场作废 ——
-// 用户改完邮箱立刻掉线, 100% 复现。与改密同一个陷阱, 与封禁相反。
+// 与改密完全同一处理, 理由见 password_guard.go 里同名注释: 纪元若只推到 changedAt 那一秒,
+// 与它同秒签发的其它设备 token 会幸存到 TTL 结束; 而只推纪元不动重签 iat, 刚重签的
+// token 又会被自己作废。两者必须一起改。
 func (g *EmailChangeGuard) Confirm(ctx context.Context, req EmailChangeConfirm) (EmailChangeOutcome, error) {
 	proof, err := g.verif.Verify(ctx, PurposeChangeEmail, req.UserID, req.Code)
 	if err != nil {
@@ -175,12 +181,12 @@ func (g *EmailChangeGuard) Confirm(ctx context.Context, req EmailChangeConfirm) 
 		g.emit(ctx, EventPasswordRevokeFailed, req.UserID, "邮箱已改但吊销会话失败: "+revErr.Error())
 	}
 	if g.revoker != nil {
-		if err := g.revoker.Revoke(ctx, req.UserID, changedAt); err != nil {
+		if err := g.revoker.RevokeIssuedThrough(ctx, req.UserID, changedAt); err != nil {
 			g.emit(ctx, EventRevocationWriteFailed, req.UserID, err.Error())
 		}
 	}
 	if g.reissue != nil && req.CurrentSessionID != "" {
-		re, err := g.reissue.Reissue(ctx, req.UserID, req.DeviceInfo, req.ClientIP)
+		re, err := g.reissue.Reissue(ctx, req.UserID, req.DeviceInfo, req.ClientIP, nextSecond(changedAt))
 		if err != nil {
 			g.emit(ctx, EventPasswordReissueFailed, req.UserID, err.Error())
 		} else {
