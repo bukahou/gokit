@@ -64,6 +64,13 @@ type FailureStore interface {
 	Peek(ctx context.Context, key string) (FailureState, error)
 
 	// Bump 原子自增, 返回自增【之后】的状态。
+	//
+	// ⚠️ "之后"指【本次自增】之后: 自增与回读必须同属一个原子区间 ——
+	// 事务 (InnoDB 行锁到 commit, 回读必是自己的), 或 MySQL 的
+	// `ON DUPLICATE KEY UPDATE count = LAST_INSERT_ID(count + 1)` 单往返。
+	// ⛔ "UPSERT 之后再 SELECT" 不满足: 并发下读到的可能是别人的自增,
+	// Count 只会偏大 (提前拒绝) 不会偏小, 但判定依赖的是【我这一次】的值。
+	// storetest 的并发断言要求 n 次并发 Bump 返回的 Count 恰为 1..n 的一个排列。
 	Bump(ctx context.Context, key string, now time.Time) (FailureState, error)
 
 	// Reset 清除该键的计数。键不存在时返回 nil。

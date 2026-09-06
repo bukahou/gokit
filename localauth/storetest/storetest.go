@@ -138,19 +138,41 @@ func RunFailureStoreTests(t *testing.T, factory func(t *testing.T) localauth.Fai
 		s := factory(t)
 		const n = 64
 		var wg sync.WaitGroup
+		var mu sync.Mutex
+		seen := map[int]int{}
 		for i := 0; i < n; i++ {
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
-				if _, err := s.Bump(ctx, "hot", now); err != nil {
+				st, err := s.Bump(ctx, "hot", now)
+				if err != nil {
 					t.Error(err)
+					return
 				}
+				mu.Lock()
+				seen[st.Count]++
+				mu.Unlock()
 			}()
 		}
 		wg.Wait()
 		st, _ := s.Peek(ctx, "hot")
 		if st.Count != n {
 			t.Fatalf("⛔ 并发 %d 次 Bump 后 Count=%d —— 读-改-写竞态, 退避可被并发绕开", n, st.Count)
+		}
+		// ⭐ 每次返回的 Count 必须是【自己这一次】的: n 次返回值恰为 1..n 的一个排列。
+		// "UPSERT 后再 SELECT" 会让多个调用读到同一个(别人的)值, 在这里露馅。
+		var dup, missing []int
+		for c := 1; c <= n; c++ {
+			switch seen[c] {
+			case 0:
+				missing = append(missing, c)
+			case 1:
+			default:
+				dup = append(dup, c)
+			}
+		}
+		if len(dup) > 0 || len(missing) > 0 {
+			t.Fatalf("⛔ 并发 Bump 的返回值不是 1..%d 的排列: 重复=%v 缺失=%v —— 自增与回读不在同一原子区间", n, dup, missing)
 		}
 	})
 }

@@ -48,4 +48,5 @@
   唯一结构变化：Redis 实现移到 `redisstore/`，让不用 Redis 的宿主不 import go-redis。
 - `v0.1.1`（2026-09-06）：`storetest.RunSessionStoreTests` 增加 `SessionOptions.UserID`（宿主注入 id 映射）——第一个真实消费者的 user_id 是 UUID，契约里的 "u1" 被拒绝。
 - `v0.1.2`（2026-09-06）：`storetest` 验证码契约改用 32 字节哈希（真库 BINARY(32) 列会补零，短串比较误报）；去掉"消费编造 id"的断言（id 形态由存储决定）。两条都是第一个真实存储跑出来的。
+- `v0.1.3`（2026-09-06）：`FailureStore.Bump` 注释明确"自增与回读同一原子区间"，storetest 并发断言改为返回值须是 1..n 的排列（UPSERT 后再 SELECT 会露馅）；`SessionStore.Rotate` 单列三条 DDL 级实现约束（prev_hash 列 / 单条原子 UPDATE / 失配填 UserID）。前者由 melete 指出，后者由 melete 的 DDL 漏列暴露。
 - v0 期间 API 可改；两家宿主（geass-v3、melete）稳定后升 v1.0.0。
