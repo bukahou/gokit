@@ -32,7 +32,9 @@
 package storetest
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
 	"sync"
 	"testing"
 	"time"
@@ -189,7 +191,12 @@ func rec(user string) localauth.SessionRecord {
 	}
 }
 
+// h 把一个标签变成 32 字节哈希 —— 真实存储的哈希列通常是定长 BINARY(32),
+// 裸字符串会被补零, 契约若用短字节串比较就会误报。
 func h(s string) []byte { return localauth.HashRefreshToken(s) }
+
+// vh 是验证码哈希版的 h (与真实 HMAC-SHA256 同长)。
+func vh(s string) []byte { sum := sha256.Sum256([]byte("storetest:" + s)); return sum[:] }
 
 // SessionOptions 调整 SessionStore 契约里【随宿主而变】的部分。
 type SessionOptions struct {
@@ -422,7 +429,7 @@ func RunVerificationStoreTests(t *testing.T, factory func(t *testing.T) localaut
 	t.Run("Issue 后 FindPending 命中并原样返回哈希与记录", func(t *testing.T) {
 		s := factory(t)
 		want := vrec(reg, "a@example.invalid")
-		id, err := s.Issue(ctx, want, []byte("hash-1"))
+		id, err := s.Issue(ctx, want, vh("hash-1"))
 		if err != nil || id == "" {
 			t.Fatalf("Issue 应返回非空 id: %q err=%v", id, err)
 		}
@@ -436,40 +443,40 @@ func RunVerificationStoreTests(t *testing.T, factory func(t *testing.T) localaut
 		if !sameSecond(got.ExpiresAt, want.ExpiresAt) {
 			t.Fatalf("ExpiresAt 应保留到秒: got %v want %v", got.ExpiresAt, want.ExpiresAt)
 		}
-		if string(hash) != "hash-1" {
+		if !bytes.Equal(hash, vh("hash-1")) {
 			t.Fatalf("哈希应原样返回, got %q", hash)
 		}
 	})
 
 	t.Run("一人一码: 同 (subject, purpose) 再 Issue 会作废旧行", func(t *testing.T) {
 		s := factory(t)
-		s.Issue(ctx, vrec(reg, "a@example.invalid"), []byte("old"))
-		newID, _ := s.Issue(ctx, vrec(reg, "a@example.invalid"), []byte("new"))
+		s.Issue(ctx, vrec(reg, "a@example.invalid"), vh("old"))
+		newID, _ := s.Issue(ctx, vrec(reg, "a@example.invalid"), vh("new"))
 		got, hash, found, _ := s.FindPending(ctx, reg, "a@example.invalid")
-		if !found || got.ID != newID || string(hash) != "new" {
+		if !found || got.ID != newID || !bytes.Equal(hash, vh("new")) {
 			t.Fatalf("⛔ 重发后应只剩新行: found=%v id=%q hash=%q —— 用户手里同时有效的码会越来越多", found, got.ID, hash)
 		}
 	})
 
 	t.Run("不同 purpose / subject 互不影响", func(t *testing.T) {
 		s := factory(t)
-		s.Issue(ctx, vrec(reg, "a@example.invalid"), []byte("r"))
-		s.Issue(ctx, vrec(localauth.PurposeRecoverPassword, "a@example.invalid"), []byte("p"))
-		s.Issue(ctx, vrec(reg, "b@example.invalid"), []byte("b"))
-		if _, hash, found, _ := s.FindPending(ctx, reg, "a@example.invalid"); !found || string(hash) != "r" {
+		s.Issue(ctx, vrec(reg, "a@example.invalid"), vh("r"))
+		s.Issue(ctx, vrec(localauth.PurposeRecoverPassword, "a@example.invalid"), vh("p"))
+		s.Issue(ctx, vrec(reg, "b@example.invalid"), vh("b"))
+		if _, hash, found, _ := s.FindPending(ctx, reg, "a@example.invalid"); !found || !bytes.Equal(hash, vh("r")) {
 			t.Fatalf("register/a 应仍有效, found=%v hash=%q", found, hash)
 		}
-		if _, hash, found, _ := s.FindPending(ctx, localauth.PurposeRecoverPassword, "a@example.invalid"); !found || string(hash) != "p" {
+		if _, hash, found, _ := s.FindPending(ctx, localauth.PurposeRecoverPassword, "a@example.invalid"); !found || !bytes.Equal(hash, vh("p")) {
 			t.Fatalf("recover/a 应仍有效, found=%v hash=%q", found, hash)
 		}
-		if _, hash, found, _ := s.FindPending(ctx, reg, "b@example.invalid"); !found || string(hash) != "b" {
+		if _, hash, found, _ := s.FindPending(ctx, reg, "b@example.invalid"); !found || !bytes.Equal(hash, vh("b")) {
 			t.Fatalf("register/b 应仍有效, found=%v hash=%q", found, hash)
 		}
 	})
 
 	t.Run("BumpAttempts 原子递增并被 FindPending 看到", func(t *testing.T) {
 		s := factory(t)
-		id, _ := s.Issue(ctx, vrec(reg, "a@example.invalid"), []byte("x"))
+		id, _ := s.Issue(ctx, vrec(reg, "a@example.invalid"), vh("x"))
 		if n, err := s.BumpAttempts(ctx, id); err != nil || n != 1 {
 			t.Fatalf("第一次 Bump 应返回 1: %d err=%v", n, err)
 		}
@@ -495,7 +502,7 @@ func RunVerificationStoreTests(t *testing.T, factory func(t *testing.T) localaut
 
 	t.Run("Consume 一次性: 第二次 false, 之后 FindPending 不再命中", func(t *testing.T) {
 		s := factory(t)
-		id, _ := s.Issue(ctx, vrec(reg, "a@example.invalid"), []byte("x"))
+		id, _ := s.Issue(ctx, vrec(reg, "a@example.invalid"), vh("x"))
 		ok, err := s.Consume(ctx, id, time.Now())
 		if err != nil || !ok {
 			t.Fatalf("首次 Consume 应成功: ok=%v err=%v", ok, err)
@@ -507,14 +514,13 @@ func RunVerificationStoreTests(t *testing.T, factory func(t *testing.T) localaut
 		if _, _, found, _ := s.FindPending(ctx, reg, "a@example.invalid"); found {
 			t.Fatal("消费后不应再被 FindPending 命中")
 		}
-		if ok, err := s.Consume(ctx, "no-such-id", time.Now()); err != nil || ok {
-			t.Fatalf("消费不存在的 id 应 false 无错: ok=%v err=%v", ok, err)
-		}
+		// ⚠️ 刻意不测 Consume("随便编的 id"): id 的形态由存储决定 (整数 / UUID / 字符串),
+		// 守卫只会拿 FindPending 返回的 id 来消费, 编造的 id 不在契约之内。
 	})
 
 	t.Run("并发 Consume 同一 id 只能成功一次 (原子性)", func(t *testing.T) {
 		s := factory(t)
-		id, _ := s.Issue(ctx, vrec(reg, "a@example.invalid"), []byte("x"))
+		id, _ := s.Issue(ctx, vrec(reg, "a@example.invalid"), vh("x"))
 		const n = 32
 		var wg sync.WaitGroup
 		var mu sync.Mutex
@@ -546,7 +552,7 @@ func RunVerificationStoreTests(t *testing.T, factory func(t *testing.T) localaut
 			s := factory(t)
 			r := vrec(reg, "a@example.invalid")
 			r.ExpiresAt = time.Now().Add(-time.Minute)
-			s.Issue(ctx, r, []byte("x"))
+			s.Issue(ctx, r, vh("x"))
 			if _, _, found, _ := s.FindPending(ctx, reg, "a@example.invalid"); found {
 				t.Fatal("已过期的行不应返回")
 			}

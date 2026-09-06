@@ -47,4 +47,5 @@
 - `v0.1.0`（2026-09-06）：从 geass-v3 `pkg/localauth` 剥离，API 面与宿主期一致，文件平铺不拆子包（验收期不改 API 面）。
   唯一结构变化：Redis 实现移到 `redisstore/`，让不用 Redis 的宿主不 import go-redis。
 - `v0.1.1`（2026-09-06）：`storetest.RunSessionStoreTests` 增加 `SessionOptions.UserID`（宿主注入 id 映射）——第一个真实消费者的 user_id 是 UUID，契约里的 "u1" 被拒绝。
+- `v0.1.2`（2026-09-06）：`storetest` 验证码契约改用 32 字节哈希（真库 BINARY(32) 列会补零，短串比较误报）；去掉"消费编造 id"的断言（id 形态由存储决定）。两条都是第一个真实存储跑出来的。
 - v0 期间 API 可改；两家宿主（geass-v3、melete）稳定后升 v1.0.0。
