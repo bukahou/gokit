@@ -191,29 +191,43 @@ func rec(user string) localauth.SessionRecord {
 
 func h(s string) []byte { return localauth.HashRefreshToken(s) }
 
+// SessionOptions 调整 SessionStore 契约里【随宿主而变】的部分。
+type SessionOptions struct {
+	// UserID 把契约里的逻辑用户名 ("u1" / "u2" / "someone-else") 映射成宿主接受的 id。
+	// 模块不假设 id 形态 (UUID / 整数 / 别的), 但宿主的存储通常会校验它 ——
+	// 第一个真实消费者 (user_id 是 UUID 的 binary(16)) 就因此拒绝了 "u1"。
+	// 不设则原样使用。映射必须是单射: 不同逻辑名不得映到同一个 id。
+	UserID func(name string) string
+}
+
 // RunSessionStoreTests 跑 SessionStore 契约。
-func RunSessionStoreTests(t *testing.T, factory func(t *testing.T) localauth.SessionStore) {
+func RunSessionStoreTests(t *testing.T, factory func(t *testing.T) localauth.SessionStore, opts ...SessionOptions) {
 	t.Helper()
 	ctx := context.Background()
+	uid := func(name string) string { return name }
+	if len(opts) > 0 && opts[0].UserID != nil {
+		uid = opts[0].UserID
+	}
+	u1, u2, other := uid("u1"), uid("u2"), uid("someone-else")
 
 	t.Run("Create 返回带 ID 的记录, 且 ID 互不相同", func(t *testing.T) {
 		s := factory(t)
-		a, err := s.Create(ctx, rec("u1"), h("t1"))
+		a, err := s.Create(ctx, rec(u1), h("t1"))
 		if err != nil {
 			t.Fatal(err)
 		}
-		b, _ := s.Create(ctx, rec("u1"), h("t2"))
+		b, _ := s.Create(ctx, rec(u1), h("t2"))
 		if a.ID == "" || b.ID == "" || a.ID == b.ID {
 			t.Fatalf("ID 必须非空且唯一: %q %q", a.ID, b.ID)
 		}
-		if a.UserID != "u1" {
+		if a.UserID != u1 {
 			t.Fatalf("返回的记录应保留 UserID, got %q", a.UserID)
 		}
 	})
 
 	t.Run("FindByHash 只命中有效会话", func(t *testing.T) {
 		s := factory(t)
-		created, _ := s.Create(ctx, rec("u1"), h("t1"))
+		created, _ := s.Create(ctx, rec(u1), h("t1"))
 		got, found, err := s.FindByHash(ctx, h("t1"))
 		if err != nil || !found || got.ID != created.ID {
 			t.Fatalf("应命中刚建的会话: found=%v id=%q err=%v", found, got.ID, err)
@@ -229,13 +243,13 @@ func RunSessionStoreTests(t *testing.T, factory func(t *testing.T) localauth.Ses
 
 	t.Run("Rotate 成功: 旧哈希失效, 新哈希生效, 过期时间更新", func(t *testing.T) {
 		s := factory(t)
-		created, _ := s.Create(ctx, rec("u1"), h("t1"))
+		created, _ := s.Create(ctx, rec(u1), h("t1"))
 		exp := time.Now().Truncate(time.Second).Add(2 * time.Hour)
 		got, out, err := s.Rotate(ctx, h("t1"), h("t2"), exp)
 		if err != nil || out != localauth.RotateRotated {
 			t.Fatalf("应 Rotated: out=%v err=%v", out, err)
 		}
-		if got.ID != created.ID || got.UserID != "u1" {
+		if got.ID != created.ID || got.UserID != u1 {
 			t.Fatalf("Rotate 应返回该会话的记录, got %+v", got)
 		}
 		if !sameSecond(got.ExpiresAt, exp) {
@@ -251,7 +265,7 @@ func RunSessionStoreTests(t *testing.T, factory func(t *testing.T) localauth.Ses
 
 	t.Run("Rotate 用【上一个】哈希 = 重放, 且必须填上 UserID", func(t *testing.T) {
 		s := factory(t)
-		s.Create(ctx, rec("u1"), h("t1"))
+		s.Create(ctx, rec(u1), h("t1"))
 		s.Rotate(ctx, h("t1"), h("t2"), time.Now().Add(time.Hour))
 		got, out, err := s.Rotate(ctx, h("t1"), h("t3"), time.Now().Add(time.Hour))
 		if err != nil {
@@ -260,7 +274,7 @@ func RunSessionStoreTests(t *testing.T, factory func(t *testing.T) localauth.Ses
 		if out != localauth.RotateReplayed {
 			t.Fatalf("⛔ 拿已被换走的 token 再换应判为 Replayed, got %v —— 分不清重放与失效, 处置会反过来", out)
 		}
-		if got.UserID != "u1" {
+		if got.UserID != u1 {
 			t.Fatalf("⛔ 重放时必须按上一个哈希反查出归属 (UserID), got %q —— 空 UserID 等于放弃反击", got.UserID)
 		}
 		if _, found, _ := s.FindByHash(ctx, h("t3")); found {
@@ -270,7 +284,7 @@ func RunSessionStoreTests(t *testing.T, factory func(t *testing.T) localauth.Ses
 
 	t.Run("Rotate 命中【当前】哈希但会话已吊销 = 正常失效, 不是重放", func(t *testing.T) {
 		s := factory(t)
-		s.Create(ctx, rec("u1"), h("t1"))
+		s.Create(ctx, rec(u1), h("t1"))
 		s.RevokeByHash(ctx, h("t1"))
 		got, out, err := s.Rotate(ctx, h("t1"), h("t2"), time.Now().Add(time.Hour))
 		if err != nil {
@@ -279,7 +293,7 @@ func RunSessionStoreTests(t *testing.T, factory func(t *testing.T) localauth.Ses
 		if out != localauth.RotateRevoked {
 			t.Fatalf("⛔ 已登出的会话再刷新应判为 Revoked, got %v —— 判成重放会把该用户全部会话吊掉", out)
 		}
-		if got.UserID != "u1" {
+		if got.UserID != u1 {
 			t.Fatalf("Revoked 时也应填上 UserID, got %q", got.UserID)
 		}
 	})
@@ -294,7 +308,7 @@ func RunSessionStoreTests(t *testing.T, factory func(t *testing.T) localauth.Ses
 
 	t.Run("并发 Rotate 同一旧哈希只能成功一次 (原子性)", func(t *testing.T) {
 		s := factory(t)
-		s.Create(ctx, rec("u1"), h("t1"))
+		s.Create(ctx, rec(u1), h("t1"))
 		const n = 32
 		var wg sync.WaitGroup
 		var mu sync.Mutex
@@ -323,14 +337,14 @@ func RunSessionStoreTests(t *testing.T, factory func(t *testing.T) localauth.Ses
 
 	t.Run("RevokeByID 必须同时匹配 userID (防 IDOR)", func(t *testing.T) {
 		s := factory(t)
-		created, _ := s.Create(ctx, rec("u1"), h("t1"))
-		if err := s.RevokeByID(ctx, "someone-else", created.ID); err != nil {
+		created, _ := s.Create(ctx, rec(u1), h("t1"))
+		if err := s.RevokeByID(ctx, other, created.ID); err != nil {
 			t.Fatal(err)
 		}
 		if _, found, _ := s.FindByHash(ctx, h("t1")); !found {
 			t.Fatal("⛔ 别人的 userID 不得吊销我的会话 (IDOR)")
 		}
-		s.RevokeByID(ctx, "u1", created.ID)
+		s.RevokeByID(ctx, u1, created.ID)
 		if _, found, _ := s.FindByHash(ctx, h("t1")); found {
 			t.Fatal("本人吊销后应失效")
 		}
@@ -338,31 +352,31 @@ func RunSessionStoreTests(t *testing.T, factory func(t *testing.T) localauth.Ses
 
 	t.Run("RevokeAllByUser / RevokeOthersByUser / ListByUser", func(t *testing.T) {
 		s := factory(t)
-		keep, _ := s.Create(ctx, rec("u1"), h("k"))
-		s.Create(ctx, rec("u1"), h("o1"))
-		s.Create(ctx, rec("u1"), h("o2"))
-		s.Create(ctx, rec("u2"), h("other"))
+		keep, _ := s.Create(ctx, rec(u1), h("k"))
+		s.Create(ctx, rec(u1), h("o1"))
+		s.Create(ctx, rec(u1), h("o2"))
+		s.Create(ctx, rec(u2), h("other"))
 
-		list, err := s.ListByUser(ctx, "u1")
+		list, err := s.ListByUser(ctx, u1)
 		if err != nil || len(list) != 3 {
 			t.Fatalf("u1 应有 3 条有效会话, got %d err=%v", len(list), err)
 		}
-		n, err := s.RevokeOthersByUser(ctx, "u1", keep.ID)
+		n, err := s.RevokeOthersByUser(ctx, u1, keep.ID)
 		if err != nil || n != 2 {
 			t.Fatalf("RevokeOthers 应吊销 2 条, got %d err=%v", n, err)
 		}
 		if _, found, _ := s.FindByHash(ctx, h("k")); !found {
 			t.Fatal("⛔ RevokeOthers 把保留的那条也吊了 —— '登出其它设备'会把自己踢掉")
 		}
-		list, _ = s.ListByUser(ctx, "u1")
+		list, _ = s.ListByUser(ctx, u1)
 		if len(list) != 1 || list[0].ID != keep.ID {
 			t.Fatalf("ListByUser 应只剩保留的那条, got %+v", list)
 		}
-		n, err = s.RevokeAllByUser(ctx, "u1")
+		n, err = s.RevokeAllByUser(ctx, u1)
 		if err != nil || n != 1 {
 			t.Fatalf("RevokeAll 应吊销剩下 1 条, got %d err=%v", n, err)
 		}
-		if list, _ := s.ListByUser(ctx, "u1"); len(list) != 0 {
+		if list, _ := s.ListByUser(ctx, u1); len(list) != 0 {
 			t.Fatalf("RevokeAll 后应为空, got %d", len(list))
 		}
 		if _, found, _ := s.FindByHash(ctx, h("other")); !found {
