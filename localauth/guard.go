@@ -146,7 +146,7 @@ const (
 	// ⚠️⚠️ 与 password.breach_check_unavailable 是同一族: fail-open 的代价凭证。
 	//
 	// ⛔ 没有它, Redis 挂掉之后"改密/封禁立即生效"会静默退化成
-	// "最长 900 秒后生效", 而表现与一切正常完全一样 —— 没有报错,
+	// "最长一个 access TTL 之后才生效", 而表现与一切正常完全一样 —— 没有报错,
 	// 没有拒绝, 用户照常使用。这正是最难发现的那类失效。
 	//
 	// WARN 级, 聚合超阈值即告警。
@@ -157,7 +157,7 @@ const (
 	// ⚠️ WARN 而非 ERROR: 写失败只丢"立刻生效"这一层,
 	// 而 §7.7 与会话吊销仍然保证"下一次 refresh 时生效" ——
 	// 两层是【及时性】与【正确性】的分工, 丢上层不致命。
-	// ⛔ 但也不能不记: 持续写失败意味着封禁始终要等 900 秒才生效。
+	// ⛔ 但也不能不记: 持续写失败意味着封禁始终要等满一个 access TTL 才生效。
 	EventRevocationWriteFailed EventKind = "session.revocation_write_failed"
 
 	// ⭐ 验证码流程 (批次四)。
@@ -184,7 +184,7 @@ const (
 	EventAccountRegistered EventKind = "account.registered"
 	// EventRecoveryAddressChanged ⭐ 找回完成时发现码发往的地址已不是当前已验证地址。
 	//
-	// ⚠️ WARN —— 这正是 2026-09-05 实测接管链的形状 (先换恢复地址再申请找回)。
+	// ⚠️ WARN —— 这正是 实测到的接管链的形状 (先换恢复地址再申请找回)。
 	EventRecoveryAddressChanged EventKind = "recovery.address_changed"
 	// EventPasswordReset 凭验证码重置了口令 (非登录态)。INFO。
 	EventPasswordReset EventKind = "password.reset"
@@ -202,9 +202,9 @@ const (
 // ⭐ 它的用途是让消费者【能够穷举】: 把审计事件映射成日志/告警的那段
 // switch 是本清单的一份副本, 而副本一定会漏。
 //
-// ⚠️ 2026-09-05 漏过一次: 批次二加了四个 session 事件, 消费者侧
-// (internal/user auditToSlog) 一个 case 都没加也没有 default,
-// 于是它们在生产中【一条都不记】—— 包括 replay_detected,
+// ⚠️ 真实踩过一次: 新增四个 session 事件时, 消费者侧的
+// 事件→日志映射一个 case 都没加也没有 default,
+// 于是它们【一条都不记】—— 包括 replay_detected,
 // 也就是"用户为什么突然全部登出"的唯一解释来源。
 //
 // ⛔ 新增 EventKind 时必须同时加进这里。忘了加不会立刻出错,
@@ -282,7 +282,7 @@ type AuditEvent struct {
 	// Detail 是可选的补充说明 (如"已吊销 N 条会话" / "吊销失败: ...")。
 	// ⛔ 不得放任何凭证或其哈希。
 	//
-	// ⚠️⚠️ 消费者【必须】把它记进日志。2026-09-05 生产实测它被整个丢掉了,
+	// ⚠️⚠️ 消费者【必须】把它记进日志。生产实测中它被整个丢掉过,
 	// 后果不只是少一个数字: sessionDetail 用这个字段传递【吊销失败】——
 	// 重放检测判定成立却没能吊销成功, 意味着攻击者那条链还活着,
 	// 而这个失败当时在日志里完全不可见。

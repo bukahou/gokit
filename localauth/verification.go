@@ -218,7 +218,7 @@ func WithVerificationClock(f func() time.Time) VerificationOption {
 // 哈希就是随机数。
 //
 // ⚠️ pepper 丢失的代价只是【在途的 10 分钟验证码全部作废】—— 用户重新申请一次
-// 即可。与 AKASHA_PAIRWISE_SALT 那种"丢了永久失效"不是一个量级, 所以它不需要
+// 即可。与那种【丢失即永久失效】的上游密钥不是一个量级, 所以它不需要
 // 那种级别的保管纪律。
 //
 // ⚠️ addrStore / ipStore 必填: 缺了限流就静默消失, 而失效的表现是"SMTP 配额被

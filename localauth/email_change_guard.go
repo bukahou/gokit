@@ -27,7 +27,7 @@ type EmailChanger interface {
 // # 18.3.4 安全出口划在「验证」不在「触碰」
 //
 // Request 【不改库】: email / email_verified 纹丝不动, 只给新地址发码。
-// 2026-09-05 实测的接管链正是从"资料接口直接写 email"开始的 ——
+// 实测过的接管链正是从"资料接口直接写 email"开始的 ——
 // 改邮箱的唯一入口就是这里, 而这里的写入发生在验证之后。
 type EmailChangeGuard struct {
 	verif    *VerificationGuard

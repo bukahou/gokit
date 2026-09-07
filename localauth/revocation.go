@@ -48,7 +48,7 @@ type RevocationStore interface {
 // # ⭐ 它顺带解决的不止改密
 //
 //	改密          → 立即失效 (§7.3 的 access 侧)
-//	封禁 / 停用   → 立即失效 (此前要等 access TTL 到期, 最长 900 秒)
+//	封禁 / 停用   → 立即失效 (此前要等 access TTL 到期, 最长一个 access TTL)
 //	强制登出      → 免费获得这个能力
 //
 // 三件事共用同一个纪元, 因为它们要表达的是同一句话:
@@ -96,7 +96,7 @@ func (c *RevocationChecker) Enabled() bool { return c.store != nil }
 //
 // ⛔ 绝不能 fail-closed: 那等于"Redis 抖动 = 全站掉线",
 // 违反 pkg/cache 立的第一条约束「缓存故障绝不能变成业务故障」。
-// 而放行的后果只是退回到本特性上线前的状态(靠 access TTL 兜底, ≤900 秒),
+// 而放行的后果只是退回到本特性上线前的状态(靠 access TTL 兜底, ≤ 一个 access TTL),
 // ⚠️ 两种代价【不在一个量级】。
 //
 // ⚠️ 但故障必须留痕: 只有 error 那一支发事件。
@@ -149,7 +149,7 @@ func nextSecond(t time.Time) time.Time { return t.Truncate(time.Second).Add(time
 //
 //	13:00:14.2 登录 → token.iat = 13:00:14
 //	13:00:14.7 封禁 → epoch     = 13:00:14
-//	13:00:14 < 13:00:14 ？ 否 → ⛔ 该 token 幸存, 然后活满 900 秒
+//	13:00:14 < 13:00:14 ？ 否 → ⛔ 该 token 幸存, 然后活满整个 access TTL
 //
 // 生产实测(2026-09-05): 同一秒内登录+封禁 → access token 返回 200;
 // 相隔 3 秒 → 401。窗口宽度 ≤1 秒, 但落进去的代价是【完整的 TTL】。

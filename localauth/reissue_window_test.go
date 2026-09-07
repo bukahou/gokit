@@ -13,7 +13,7 @@ import (
 //
 // 纪元判定是 `iat < epoch`（相等不算失效, 见 revocation.go）。而改密曾用 `Revoke(changedAt)`
 // 写纪元, 于是「与 changedAt 同一秒签发」的 token 满足 `iat == epoch` → 幸存,
-// 而且是幸存到 access TTL 结束（生产配置 900 秒）, 不是幸存一秒。
+// 而且是幸存到 access TTL 结束（分钟量级, 由宿主配置）, 不是幸存一秒。
 //
 // 2026-09-06 生产实测: 扫 14 个登录相位, 命中 1 次 —— `B.iat = 纪元 = 1788684892`,
 // 其它设备的 /api/user/info 返回 200。封禁那条路径因为用 `RevokeIssuedThrough`（推到下一秒）
@@ -69,7 +69,7 @@ func assertOtherDeviceKilled(t *testing.T, c *RevocationChecker, userID string, 
 	t.Helper()
 	if !c.IsRevoked(context.Background(), userID, otherIat) {
 		t.Fatalf("⛔ 其它设备的 access token 幸存: 它的 iat=%d, 而纪元只推到能让它活下来的位置 —— "+
-			"这张 token 会一直有效到 access TTL 结束(生产 900 秒), 而用户改密的动机往往正是"+
+			"这张 token 会一直有效到 access TTL 结束(分钟量级, 由宿主配置), 而用户改密的动机往往正是"+
 			"怀疑账号被盗", otherIat.Unix())
 	}
 }

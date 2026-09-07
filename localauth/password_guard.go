@@ -78,7 +78,7 @@ type PasswordGuard struct {
 	// revoker 推进吊销纪元, 让【已签发的 access token】立即失效。
 	//
 	// ⚠️ 没有它, 改密只对 refresh 侧立即生效(§7.7), 而旧的 access token
-	// 仍能用满 TTL(默认 900 秒)。⛔ 那意味着"改密踢掉攻击者"这件事
+	// 仍能用满整个 access TTL。⛔ 那意味着"改密踢掉攻击者"这件事
 	// 有一个 15 分钟的窗口 —— 而攻击者恰恰在那个窗口里最活跃。
 	revoker *RevocationChecker
 }
@@ -296,8 +296,8 @@ func (g *PasswordGuard) Change(ctx context.Context, req ChangeRequest) (ChangeOu
 	// ⛔ 所以新 token 不会被自己作废, 且这与 ⑦.5 和 ⑧ 谁先谁后【无关】。
 	// ⚠️⚠️ 2026-09-06 (v0.2.0) 修正: 旧写法 Revoke(changedAt) 把纪元设在 changedAt 那一秒,
 	// 而判定是 `iat < epoch`(相等不算失效) —— 于是与 changedAt【同一秒签发】的其它设备 token
-	// 满足 iat == epoch 而幸存, 且幸存到 access TTL 结束(生产 900 秒), 不是一秒。
-	// 生产实测扫 14 个登录相位命中 1 次。⛔ 但只把纪元换成 Through 会连刚重签的 token 一起作废,
+	// 满足 iat == epoch 而幸存, 且幸存到 access TTL 结束(分钟量级, 由宿主配置), 不是一秒。
+	// 实测扫 14 个登录相位命中 1 次。⛔ 但只把纪元换成 Through 会连刚重签的 token 一起作废,
 	// ✅ 所以重签的 iat 也定到同一个 epoch(见下方 reissueAt): iat == epoch 靠"相等不算失效"幸存,
 	//    其它设备 iat ≤ changedAt < epoch 全部失效。两个目标同时成立, 窗口关闭。
 	// 顺序上仍放在重签之前: 若进程在两步之间崩溃, "已吊销但没重签"好过"已重签但没吊销"。

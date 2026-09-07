@@ -147,7 +147,7 @@ func TestRevocation_存储故障必须fail_open且留痕(t *testing.T) {
 	// ⭐ 但必须留痕, 否则 fail-open 的代价看不见。
 	if len(events) != 1 || events[0] != EventRevocationCheckUnavailable {
 		t.Errorf("⛔ 降级没留痕 (%v) —— Redis 挂掉后'封禁立即生效'会静默"+
-			"退化成'最长 900 秒后生效', 而表现与一切正常完全一样", events)
+			"退化成'最长一个 access TTL 之后才生效', 而表现与一切正常完全一样", events)
 	}
 }
 
@@ -183,7 +183,7 @@ func TestRevocation_未配置时永远放行且不panic(t *testing.T) {
 //
 // # 现象 (生产实测 2026-09-05)
 //
-//	同一秒内登录+封禁 → access token 返回 200 ⛔ 幸存, 然后活满 900 秒
+//	同一秒内登录+封禁 → access token 返回 200 ⛔ 幸存, 然后活满整个 access TTL
 //	相隔 3 秒         → 401 ✅
 //
 // 成因: JWT 的 iat 是秒精度, 判定是 `iat < epoch`("相等不算失效")。
@@ -231,7 +231,7 @@ func TestRevocation_同一秒签发的token必须被封禁杀掉(t *testing.T) {
 		}
 		if !c.IsRevoked(ctx, "banned", tokenIAT) {
 			t.Fatal("⛔⛔ 与封禁【同一秒】签发的 token 幸存了 —— " +
-				"它会活满整个 access TTL(900 秒), " +
+				"它会活满整个 access TTL, " +
 				"而封禁这个动作的语义是『现在就把他挡在外面』")
 		}
 		// ⭐ 但下一秒签发的必须放行 —— 否则解封后立刻登录会被误杀

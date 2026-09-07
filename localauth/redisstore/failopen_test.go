@@ -65,7 +65,7 @@ func Test运行期Redis挂掉_必须fail_open(t *testing.T) {
 
 	if revoked {
 		t.Error("⛔⛔ Redis 挂掉后拒绝了请求 —— 那等于 'Redis 抖动 = 全站掉线'。" +
-			"放行的代价只是退回本特性上线前(靠 access TTL 兜底 ≤900s), " +
+			"放行的代价只是退回本特性上线前(靠 access TTL 兜底 ≤ 一个 access TTL), " +
 			"两者不在一个量级")
 	} else {
 		t.Log("⭐ Redis 已死: 放行 (fail-open) ✅")
